@@ -27,6 +27,11 @@ class GMMHead(nn.Module):
         return pi_logits, mu, log_sigma
 
 def gmm_loss(target, pi_logits, mu, log_sigma):
+    target = target.float()
+    pi_logits = pi_logits.float()
+    mu = mu.float()
+    log_sigma = log_sigma.float()
+    
     B, S, D = target.shape
     target = target.unsqueeze(2) 
     
@@ -56,12 +61,11 @@ class QwenCALM(PreTrainedModel):
         super().__init__(config)
         
         print(f"Loading Qwen from {config.qwen_path}...")
-        # [优化] 使用 low_cpu_mem_usage 加速加载并降低内存峰值
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, 
             trust_remote_code=True,
             torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True 
+            low_cpu_mem_usage=True
         )
         
         self.use_precomputed_latents = config.use_precomputed_latents

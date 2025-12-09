@@ -14,6 +14,9 @@ from torch.optim import AdamW
 from models.modeling_calm import QwenCALM, QwenCALMConfig
 from peft import LoraConfig, get_peft_model, TaskType
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 @dataclass
 class ModelArguments:
     qwen_path: str = field(metadata={"help": "Path to Qwen-Audio pretrained folder"})
@@ -284,6 +287,10 @@ def main():
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     set_seed(training_args.seed)
+
+    if not training_args.ddp_find_unused_parameters:
+        print("Warning: Enforcing ddp_find_unused_parameters=True for mixed tasks.")
+        training_args.ddp_find_unused_parameters = True
     
     # 1. Tokenizer (设置 Left Padding)
     tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)

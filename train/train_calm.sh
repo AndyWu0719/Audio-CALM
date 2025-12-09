@@ -48,7 +48,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --gradient_checkpointing False \
     --dataloader_num_workers 8 \
     --report_to "tensorboard" \
-    --ddp_find_unused_parameters False \
+    --ddp_find_unused_parameters True \
     --run_name "calm-latent-v1" \
     --use_lora True \
     --use_precomputed_latents True \
