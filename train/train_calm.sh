@@ -4,6 +4,7 @@
 export OMP_NUM_THREADS=8
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 MASTER_PORT=29505
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
 # === 路径配置 ===
 WORK_PATH=$(pwd)
@@ -17,8 +18,8 @@ LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeec
 OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
 
 # === 训练参数 ===
-PER_DEVICE_BATCH_SIZE=2  # 使用 Latent 省显存，可以尝试增大 Batch Size
-GRAD_ACCUM=16             # 保持总 Batch Size 约为 128 (4 * 4 * 8 = 128)
+PER_DEVICE_BATCH_SIZE=1  # 使用 Latent 省显存，可以尝试增大 Batch Size
+GRAD_ACCUM=32             # 保持总 Batch Size 约为 128 (4 * 4 * 8 = 128)
 LR=1e-4                  # 基础 LR，Projector 会是 1e-3
 
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
