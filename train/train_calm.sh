@@ -18,9 +18,9 @@ LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeec
 OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
 
 # === 训练参数 ===
-PER_DEVICE_BATCH_SIZE=1  # 使用 Latent 省显存，可以尝试增大 Batch Size
-GRAD_ACCUM=32             # 保持总 Batch Size 约为 128 (4 * 4 * 8 = 128)
-LR=1e-4                  # 基础 LR，Projector 会是 1e-3
+PER_DEVICE_BATCH_SIZE=1
+GRAD_ACCUM=32
+LR=5e-5                  # Projector: 1e-3
 
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
 echo "Data Dir: $DATA_DIR"
@@ -40,7 +40,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --gradient_accumulation_steps $GRAD_ACCUM \
     --learning_rate $LR \
     --num_train_epochs 10 \
-    --save_steps 500 \
+    --save_steps 1 \
     --logging_steps 10 \
     --max_text_len 256 \
     --max_audio_len 2048 \
@@ -53,7 +53,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --use_lora True \
     --use_precomputed_latents True \
     --evaluation_strategy "steps" \
-    --eval_steps 500 \
+    --eval_steps 1 \
     --metric_for_best_model "loss" \
     --save_total_limit 2 \
     --remove_unused_columns False \
