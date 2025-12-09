@@ -40,7 +40,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --gradient_accumulation_steps $GRAD_ACCUM \
     --learning_rate $LR \
     --num_train_epochs 10 \
-    --save_steps 1 \
+    --save_steps 500 \
     --logging_steps 10 \
     --max_text_len 256 \
     --max_audio_len 2048 \
@@ -53,7 +53,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --use_lora True \
     --use_precomputed_latents True \
     --evaluation_strategy "steps" \
-    --eval_steps 1 \
+    --eval_steps 500 \
     --metric_for_best_model "loss" \
     --save_total_limit 2 \
     --remove_unused_columns False \
