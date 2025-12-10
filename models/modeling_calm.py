@@ -171,36 +171,32 @@ class QwenCALM(PreTrainedModel):
 
     # --- Energy Score Calculation ---
     def distance(self, x_1, x_2):
-        return torch.pow(torch.linalg.norm(x_1 - x_2, ord=2, dim=-1), self.beta)
+        return torch.pow(torch.linalg.norm(x_1 - x_2, ord=2, dim=-1) + 1e-8, self.beta)
     
     def energy_score(self, x, mean, log_std):
-        """
-        x: Predicted samples [num_samples, batch_size, dim]
-        mean, log_std: Parameters of the target distribution
-        """
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        mean = mean.to(torch.float32)
+        log_std = log_std.to(torch.float32)
+
         n_x = x.shape[0]
-        # Energy Distance Term 1: E[||x - x'||] (Diversity of generated samples)
         x_i = x.unsqueeze(1)  
         x_j = x.unsqueeze(0)  
         distance_matrix = self.distance(x_i, x_j)
+        
         distance_x = distance_matrix.sum(dim=(0,1)) / (n_x * (n_x - 1))
 
-        # Sampling from Target Distribution (Posterior q(z|x))
         std = torch.exp(log_std)
-        n_y = 100 # Sample 100 points from the true posterior to approximate the integral
+        n_y = 100 
         eps = torch.randn((n_y, *mean.shape), device=mean.device)
-        y = mean.unsqueeze(0) + eps * std.unsqueeze(0)  # [n_y, batch_size, dim]
+        y = mean.unsqueeze(0) + eps * std.unsqueeze(0) 
 
-        # Energy Distance Term 2: E[||x - y||] (Match generation to target)
-        x_ = x.unsqueeze(1)       # [n_x, 1, batch, dim]
-        y_ = y.unsqueeze(0)       # [1, n_y, batch, dim]
+        x_ = x.unsqueeze(1)       
+        y_ = y.unsqueeze(0)       
         distance_y = self.distance(x_, y_).mean(dim=(0, 1))
         
-        # Score = 2 * E[||x-y||] - E[||x-x'||] - E[||y-y'||]
-        # Since we maximize score (minimize -score), and E[||y-y'||] is constant w.r.t model, we ignore it.
-        # Loss = - (2 * Distance_XY - Distance_XX)
-        # However, CALM implementation uses: distance_x - 2 * distance_y
         score = distance_x - distance_y * 2
+        
         return score
 
     def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None):
@@ -228,7 +224,8 @@ class QwenCALM(PreTrainedModel):
                     log_var = torch.zeros_like(mu) - 5.0 # Fallback
                 
                 gt_mean = mu.transpose(1, 2)
-                gt_log_std = log_var.transpose(1, 2) * 0.5
+                raw_log_std = log_var.transpose(1, 2) * 0.5
+                gt_log_std = torch.clamp(raw_log_std, min=-5.0, max=3.0).contiguous()
 
         # 2. Audio Mask
         B_aud, T_aud, _ = gt_mean.shape
