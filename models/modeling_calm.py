@@ -310,9 +310,11 @@ class QwenCALM(PreTrainedModel):
                 
                 # Generate predictions
                 latent_pred = self.output_head.sample(hidden_repeated)
-                
+
                 # Calculate Energy Score (we minimize NEGATIVE score)
-                tts_step_loss = -self.energy_score(latent_pred, valid_gt_mean, valid_gt_log_std)
+                raw_score = -self.energy_score(latent_pred, valid_gt_mean, valid_gt_log_std)
+
+                tts_step_loss = raw_score.mean()
                 
                 total_loss += tts_step_loss
                 accum_tts_loss += tts_step_loss
