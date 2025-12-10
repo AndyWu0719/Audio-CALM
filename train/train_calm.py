@@ -38,7 +38,7 @@ class DataArguments:
     eval_subsets: str = field(default="dev-clean")
     max_text_len: int = field(default=256)
     max_audio_len: int = field(default=2048, metadata={"help": "Max Mel frames. If using latents, this will be scaled down by 16 automatically inside dataset logic."})
-    latent_downsample: int = field(default=256)
+    latent_downsample: int = field(default=16)
 
 class CalmDataset(Dataset):
     def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16):
