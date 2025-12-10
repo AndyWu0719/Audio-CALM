@@ -46,7 +46,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps $GRAD_ACCUM \
     --learning_rate $LR \
-    --num_train_epochs 10 \
+    --num_train_epochs 3 \
     --optim "adamw_torch_fused" \
     \
     --use_lora True \
