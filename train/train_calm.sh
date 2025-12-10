@@ -56,7 +56,6 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --ddp_find_unused_parameters True \
     \
     --dataloader_num_workers 8 \
-    --dataloader_persistent_workers True \
     --dataloader_pin_memory True \
     --remove_unused_columns False \
     \
