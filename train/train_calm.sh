@@ -3,7 +3,7 @@
 export OMP_NUM_THREADS=8
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-export PYTORCH_ENABLE_SDPA_FLASH_ATTENTION=1
+export PYTORCH_ENABLE_SDPA_FLASH_ATTENTION=0   # or just unset this line
 MASTER_PORT=29505
 
 WORK_PATH=$(pwd)
@@ -69,7 +69,8 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     \
     --use_lora True \
     --use_precomputed_latents True \
-    --bf16 True \
+    --bf16 False \
+    --fp16 True \
     --gradient_checkpointing True \
     --ddp_find_unused_parameters True \
     \

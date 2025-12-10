@@ -123,7 +123,7 @@ class QwenCALM(PreTrainedModel):
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, 
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,
             low_cpu_mem_usage=True
         )
         
