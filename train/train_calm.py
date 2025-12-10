@@ -216,6 +216,16 @@ class CalmTrainer(Trainer):
             task_modes=inputs["task_modes"]
         )
         loss = outputs["loss"]
+        
+        if self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 0:
+             loss_tts = outputs.get("loss_tts", 0.0)
+             loss_asr = outputs.get("loss_asr", 0.0)
+             if isinstance(loss_tts, torch.Tensor): loss_tts = loss_tts.item()
+             if isinstance(loss_asr, torch.Tensor): loss_asr = loss_asr.item()
+             
+             if self.args.local_rank in [-1, 0]:
+                 print(f" [Step {self.state.global_step}] Loss: {loss.item():.4f} | TTS: {loss_tts:.4f} | ASR: {loss_asr:.4f}")
+
         return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):

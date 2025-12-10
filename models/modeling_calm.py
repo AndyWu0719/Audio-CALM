@@ -148,6 +148,10 @@ class QwenCALM(PreTrainedModel):
 
         total_loss = torch.tensor(0.0, device=device)
         valid_samples = 0
+        accum_tts_loss = torch.tensor(0.0, device=device)
+        accum_asr_loss = torch.tensor(0.0, device=device)
+        tts_count = 0
+        asr_count = 0
         
         # === TTS (Text -> Audio) ===
         tts_indices = [i for i, m in enumerate(task_modes) if m == "tts"]
@@ -208,8 +212,13 @@ class QwenCALM(PreTrainedModel):
                     loss_list.append(l)
             
             if len(loss_list) > 0:
-                total_loss += torch.stack(loss_list).mean()
+                tts_step_loss = torch.stack(loss_list).mean()
+                total_loss += tts_step_loss
                 valid_samples += 1
+                
+                # 记录分项
+                accum_tts_loss += tts_step_loss
+                tts_count += 1
 
         # === ASR (Audio -> Text) ===
         asr_indices = [i for i, m in enumerate(task_modes) if m == "asr"]
@@ -260,45 +269,33 @@ class QwenCALM(PreTrainedModel):
             total_loss += loss_asr
             valid_samples += 1
 
-        # =================================================================
-        # [关键修复] 确保所有参数参与计算，以便关闭 ddp_find_unused_parameters
-        # =================================================================
-        
-        # 1. 检查是否用到了 Output Head (TTS Head)
-        # 如果当前 Batch 没有 TTS 任务，或者虽然有但被 Mask 掉了，我们需要伪造一个计算
+            accum_asr_loss += loss_asr
+            asr_count += 1
+
         if len(tts_indices) == 0:
-            # 取一个 dummy 输入过一遍 output_head
-            # 只要输入还在计算图中（比如 audio_embeds），梯度就能传导，虽然是 0
             dummy_hidden = audio_embeds[:, :1, :].mean() # Scalar
-            # 我们需要用到 output_head 的参数
-            # 简单办法：直接调用 output_head，然后 * 0
-            # 注意：输入维度要匹配
             dummy_in = torch.zeros((1, 1, 4096), device=device, dtype=audio_embeds.dtype)
-            # 为了让 dummy_in 连上计算图，我们可以用 audio_embeds * 0 + dummy_in
             dummy_in = audio_embeds[:, :1, :] * 0 
             
             pi, mu, log_sigma = self.output_head(dummy_in)
-            # 将输出求和 * 0 加到 loss
             total_loss += (pi.sum() + mu.sum() + log_sigma.sum()) * 0.0
 
-        # 2. 检查是否用到了 LM Head (ASR Head)
-        # Qwen 的 lm_head 通常绑定在 embed_tokens 或者独立，如果是 LoRA，lm_head 可能不参与训练
-        # 但如果 lm_head 参与训练（比如全量微调或特定设置），也需要处理。
-        # 通常 LoRA 模式下 lm_head 是冻结的，不需要处理。
-        # 但为了保险起见，如果 lm_head 需要梯度：
         if len(asr_indices) == 0 and self.llm.lm_head.weight.requires_grad:
-             # 同样伪造计算
              dummy_in = text_embeds[:, :1, :] * 0
              dummy_logits = self.llm.lm_head(dummy_in)
              total_loss += dummy_logits.sum() * 0.0
 
-        # =================================================================
 
         if valid_samples > 0:
             total_loss = total_loss / valid_samples
             
+        avg_tts = accum_tts_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
+        avg_asr = accum_asr_loss / asr_count if asr_count > 0 else torch.tensor(0.0, device=device)
+
         return {
             "loss": total_loss,
+            "loss_tts": avg_tts,
+            "loss_asr": avg_asr,
             "logits": None 
         }
     
