@@ -8,28 +8,20 @@ MASTER_PORT=29505
 
 WORK_PATH=$(pwd)
 QWEN_PATH="${WORK_PATH}/qwen_audio_pretrained"
-VAE_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_4x/checkpoint-54000" 
+VAE_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_16x/checkpoint-54000" 
 
 TRAIN_DATA_DIR="${WORK_PATH}/data/latents/train"
 EVAL_DATA_DIR="${WORK_PATH}/data/latents/dev"
 
 LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeech/LibriSpeech"
+OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
 
 PER_DEVICE_BATCH_SIZE=2
-GRAD_ACCUM=8
+GRAD_ACCUM=16
+LR=5e-5                  # Projector: 1e-3
 
-LATENT_DOWN=4
+NUM_MIX=8
 LATENT_DIM=64
-NOISE_SIZE=64
-MLP_LAYERS=2
-NUM_SAMPLES=8
-BETA=0.25
-LR=5e-5
-LR_TAG=${LR//./p}
-RUN_NAME="${LATENT_DOWN}-${NUM_SAMPLES}-${LATENT_DIM}-${LR_TAG}"
-
-OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_energy"
-OUTPUT_DIR="${OUTPUT_DIR_BASE}/${RUN_NAME}"
 
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
 echo "Train Data Dir: $TRAIN_DATA_DIR"
@@ -37,17 +29,12 @@ echo "Eval Data Dir: $EVAL_DATA_DIR"
 
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --do_train \
-    --run_name "$RUN_NAME" \
-    --output_dir "$OUTPUT_DIR" \
+    --run_name "calm-latent-v1" \
     --report_to "tensorboard" \
     \
+    --num_mixtures $NUM_MIX \
     --latent_dim $LATENT_DIM \
-    --latent_downsample $LATENT_DOWN \
-    --noise_size $NOISE_SIZE \
-    --num_mlp_layers $MLP_LAYERS \
-    --num_samples $NUM_SAMPLES \
-    --beta $BETA \
-    --learning_rate $LR \
+    --latent_downsample 16 \
     \
     --qwen_path "$QWEN_PATH" \
     --vae_path "$VAE_PATH" \
@@ -64,6 +51,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --per_device_train_batch_size $PER_DEVICE_BATCH_SIZE \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps $GRAD_ACCUM \
+    --learning_rate $LR \
     --num_train_epochs 3 \
     --optim "adamw_torch_fused" \
     \
@@ -86,5 +74,3 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --load_best_model_at_end True \
     --metric_for_best_model "eval_loss" \
     --greater_is_better False
-
-echo "Training finished."

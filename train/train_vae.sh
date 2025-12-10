@@ -6,9 +6,9 @@ MASTER_PORT=29500
 
 WORK_PATH=$(pwd)
 DATA_DIR="${WORK_PATH}/data/mel_features" 
-OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/audio_vae_16x"
+OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/audio_vae_8x"
 
-STRIDES="2 2 2 2" 
+STRIDES="2 2 2" 
 LATENT_DIM=64
 HIDDEN_DIM=512
 
@@ -49,7 +49,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_vae.py \
     --bf16 True \
     --ddp_find_unused_parameters False \
     --report_to "tensorboard" \
-    --run_name "audio-vae-16x" \
+    --run_name "audio-vae-8x" \
     --per_device_eval_batch_size 1 \
     --save_strategy "steps" \
 

@@ -28,11 +28,8 @@ class ModelArguments:
     lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
     use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk to speed up training."})
+    num_mixtures: int = 8
     latent_dim: int = 64
-    noise_size: int = field(default=64, metadata={"help": "Dimension of the noise vector for Energy Head"})
-    num_mlp_layers: int = field(default=2, metadata={"help": "Number of layers in the MLP Generator"})
-    num_samples: int = field(default=8, metadata={"help": "Number of samples for Energy Loss calculation"})
-    beta: float = field(default=0.25, metadata={"help": "Beta parameter for Energy distance"})
 
 @dataclass
 class DataArguments:
@@ -43,7 +40,7 @@ class DataArguments:
     eval_subsets: str = field(default="dev-clean")
     max_text_len: int = field(default=256)
     max_audio_len: int = field(default=2048, metadata={"help": "Max Mel frames. If using latents, this will be scaled down by 16 automatically inside dataset logic."})
-    latent_downsample: int = field(default=4)
+    latent_downsample: int = field(default=16)
 
 class CalmDataset(Dataset):
     def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16):
@@ -53,11 +50,11 @@ class CalmDataset(Dataset):
         self.use_latents = use_latents
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eod_id
         self.latent_downsample = latent_downsample
-        
+
         self.data = []
         subset_list = subsets.split(",")
         print(f"Scanning pairs in {subset_list}...")
-        
+
         # 1. Build file index
         file_index = {}
         for subset in subset_list:
@@ -65,19 +62,19 @@ class CalmDataset(Dataset):
             if not os.path.exists(subset_dir): 
                 print(f"Warning: Directory not found: {subset_dir}")
                 continue
-            
+
             files = glob(os.path.join(subset_dir, "*.pt"))
             for f in files:
                 key = os.path.splitext(os.path.basename(f))[0]
                 file_index[key] = f
-        
+
         print(f"Indexed {len(file_index)} audio files.")
-        
+
         # 2. Scan text
         for subset in subset_list:
             subset_dir = os.path.join(librispeech_root, subset.strip())
             if not os.path.exists(subset_dir): continue
-            
+
             for root, dirs, files in os.walk(subset_dir):
                 for file in files:
                     if file.endswith(".trans.txt"):
@@ -87,7 +84,7 @@ class CalmDataset(Dataset):
                                     parts = line.strip().split(" ", 1)
                                     if len(parts) != 2: continue
                                     file_id, text = parts
-                                    
+
                                     if file_id in file_index:
                                         self.data.append({
                                             "text": text,
@@ -99,7 +96,7 @@ class CalmDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
-    
+
     def __getitem__(self, idx):
         text_ids = [self.pad_id]
         labels = [-100]
@@ -110,10 +107,10 @@ class CalmDataset(Dataset):
         try:
             item = self.data[idx]
             text_content = item['text']
-            
+
             # === Task ===
             task_mode = "tts" if random.random() < 0.5 else "asr"
-            
+
             if task_mode == "tts":
                 prompt = f"<|im_start|>user\nRead this: {text_content}<|im_end|>\n<|im_start|>assistant\n"
                 text_ids = self.tokenizer.encode(prompt)
@@ -132,7 +129,7 @@ class CalmDataset(Dataset):
             # === Audio ===
             # Load: latents, shape [64, T] or mel, shape [80, T]
             audio = torch.load(item['file_path'], map_location="cpu") 
-            
+
             # Calculate Target Length
             if self.use_latents:
                 # Max Audio Len refers to Mel frames, Latent should be / total_stride
@@ -141,7 +138,7 @@ class CalmDataset(Dataset):
                 TARGET_LEN = self.max_audio_len
 
             real_audio_len = audio.shape[1]
-            
+
             if audio.shape[1] > TARGET_LEN:
                 start = torch.randint(0, audio.shape[1] - TARGET_LEN, (1,)).item()
                 audio = audio[:, start:start+TARGET_LEN]
@@ -150,7 +147,7 @@ class CalmDataset(Dataset):
                 pad_len = TARGET_LEN - audio.shape[1]
                 audio = torch.nn.functional.pad(audio, (0, pad_len))
                 # real_audio_len remains the original value
-                
+
         except Exception as e:
             print(f"[Dataset Error] idx={idx}: {e}")
 
@@ -185,12 +182,12 @@ def data_collator(features, pad_id):
     text_input_ids = torch.stack(padded_text_ids)
     labels_padded = torch.stack(padded_labels)
     attention_mask = torch.stack(text_attention_masks)
-    
+
     # Audio
     audio_features = torch.stack([f["audio_features"] for f in valid_features])
     audio_lens = torch.tensor([f["real_audio_len"] for f in valid_features], dtype=torch.long)
     task_modes = [f["task_mode"] for f in valid_features]
-    
+
     return {
         "text_input_ids": text_input_ids,
         "attention_mask": attention_mask,
@@ -223,26 +220,26 @@ class CalmTrainer(Trainer):
             task_modes = inputs.get("task_modes", [])
             num_tts = task_modes.count("tts")
             num_asr = task_modes.count("asr")
-            
+
             avg_tts = outputs.get("loss_tts", torch.tensor(0.0)).item()
             avg_asr = outputs.get("loss_asr", torch.tensor(0.0)).item()
-            
+
             self.meter_tts_loss += avg_tts * num_tts
             self.meter_tts_count += num_tts
             self.meter_asr_loss += avg_asr * num_asr
             self.meter_asr_count += num_asr
-             
+
         return (loss, outputs) if return_outputs else loss
-    
+
     def log(self, logs: Dict[str, float]) -> None:
         if self.args.world_size > 1:
             metrics = torch.tensor([
                 self.meter_tts_loss, float(self.meter_tts_count),
                 self.meter_asr_loss, float(self.meter_asr_count)
             ], device=self.args.device)
-            
+
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-            
+
             tts_sum, tts_cnt = metrics[0].item(), metrics[1].item()
             asr_sum, asr_cnt = metrics[2].item(), metrics[3].item()
         else:
@@ -251,7 +248,7 @@ class CalmTrainer(Trainer):
 
         logs["tts_loss"] = round(tts_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         logs["asr_loss"] = round(asr_sum / asr_cnt, 4) if asr_cnt > 0 else 0.0
-        
+
         self.meter_tts_loss = 0.0
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
@@ -266,21 +263,21 @@ class CalmTrainer(Trainer):
         if self.optimizer is None:
             decay_parameters = []
             no_decay_parameters = []
-            
+
             # Define parameter groups for specific components
             projector_parameters = []
-            
+
             # 1. Distinguish Projector/Head and other parameters (LLM/LoRA)
             # Note: model.input_proj and model.output_head are members of QwenCALM
             head_names = ["input_proj", "output_head"]
-            
+
             for name, param in self.model.named_parameters():
                 if not param.requires_grad:
                     continue
-                
+
                 # Check if belongs to Projector or Head
                 is_head = any(n in name for n in head_names)
-                
+
                 if is_head:
                     projector_parameters.append(param)
                 else:
@@ -291,7 +288,7 @@ class CalmTrainer(Trainer):
                         decay_parameters.append(param)
 
             # 2. Set parameter groups
-            
+
             optimizer_grouped_parameters = [
                 {
                     "params": decay_parameters,
@@ -315,7 +312,7 @@ class CalmTrainer(Trainer):
                 betas=(self.args.adam_beta1, self.args.adam_beta2),
                 eps=self.args.adam_epsilon,
             )
-            
+
         return self.optimizer
 
 def main():
@@ -326,7 +323,7 @@ def main():
     if not training_args.ddp_find_unused_parameters:
         print("Warning: Enforcing ddp_find_unused_parameters=True for mixed tasks.")
         training_args.ddp_find_unused_parameters = True
-    
+
     # 1. Tokenizer (Set Left Padding)
     tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
@@ -338,16 +335,13 @@ def main():
     calm_config = QwenCALMConfig(
         qwen_path=model_args.qwen_path,
         vae_path=model_args.vae_path,
+        num_mixtures=model_args.num_mixtures,
         use_precomputed_latents=model_args.use_precomputed_latents,
-        latent_dim=model_args.latent_dim,
-        noise_size=model_args.noise_size,
-        num_mlp_layers=model_args.num_mlp_layers,
-        num_samples=model_args.num_samples,
-        beta=model_args.beta
+        latent_dim=model_args.latent_dim
     )
-    
+
     model = QwenCALM(calm_config)
-    
+
     # 3. LoRA
     if model_args.use_lora:
         lora_config = LoraConfig(
@@ -360,7 +354,7 @@ def main():
         )
         model.llm = get_peft_model(model.llm, lora_config)
         model.llm.print_trainable_parameters()
-    
+
     # 4. Datasets
     train_dataset = CalmDataset(
         data_dir=data_args.mel_dir, 
@@ -384,7 +378,7 @@ def main():
         use_latents=model_args.use_precomputed_latents,
         latent_downsample=data_args.latent_downsample
     )
-    
+
     trainer = CalmTrainer(
         model=model,
         args=training_args,
@@ -392,12 +386,12 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=partial(data_collator, pad_id=tokenizer.pad_token_id)
     )
-    
+
     if training_args.resume_from_checkpoint:
         trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     else:
         trainer.train()
-        
+
     trainer.save_model(training_args.output_dir)
     model.save_pretrained(training_args.output_dir)
 

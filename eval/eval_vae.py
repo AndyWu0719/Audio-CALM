@@ -75,7 +75,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to VAE checkpoint folder")
     parser.add_argument("--audio_path", type=str, required=True, help="Path to a raw .flac/.wav file for testing")
-    parser.add_argument("--output_dir", type=str, default="./outputs/eval_results", help="Where to save results")
+    parser.add_argument("--output_dir", type=str, default="./outputs/eval_results_vae", help="Where to save results")
     args = parser.parse_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"

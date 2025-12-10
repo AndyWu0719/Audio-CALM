@@ -14,7 +14,7 @@ import editdistance as ed
 sys.path.append(os.getcwd())
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from models.modeling_calm import QwenCALM, QwenCALMConfig, sample_from_gmm
+from models.modeling_gmm import QwenCALM, QwenCALMConfig, sample_from_gmm
 from models.modeling_vae import AcousticVAE
 
 def load_calm_model(args, device):
