@@ -33,7 +33,8 @@ class ModelArguments:
     num_mlp_layers: int = field(default=2, metadata={"help": "Number of layers in the MLP Generator"})
     num_samples: int = field(default=8, metadata={"help": "Number of samples for Energy Loss calculation"})
     beta: float = field(default=0.25, metadata={"help": "Beta parameter for Energy distance"})
-
+    temperature: float = field(default=1.0, metadata={"help": "Sampling temperature during training"})
+    
 @dataclass
 class DataArguments:
     librispeech_root: str = field(metadata={"help": "Path to original LibriSpeech dataset root"})
@@ -207,6 +208,8 @@ class CalmTrainer(Trainer):
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
         self.meter_asr_count = 0
+        self.meter_div_loss = 0.0
+        self.meter_fid_loss = 0.0
 
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(
@@ -226,11 +229,15 @@ class CalmTrainer(Trainer):
             
             avg_tts = outputs.get("loss_tts", torch.tensor(0.0)).item()
             avg_asr = outputs.get("loss_asr", torch.tensor(0.0)).item()
+            avg_div = outputs.get("loss_diversity", torch.tensor(0.0)).item()
+            avg_fid = outputs.get("loss_fidelity", torch.tensor(0.0)).item()
             
             self.meter_tts_loss += avg_tts * num_tts
             self.meter_tts_count += num_tts
             self.meter_asr_loss += avg_asr * num_asr
             self.meter_asr_count += num_asr
+            self.meter_div_loss += avg_div * num_tts
+            self.meter_fid_loss += avg_fid * num_tts
              
         return (loss, outputs) if return_outputs else loss
     
@@ -238,24 +245,31 @@ class CalmTrainer(Trainer):
         if self.args.world_size > 1:
             metrics = torch.tensor([
                 self.meter_tts_loss, float(self.meter_tts_count),
-                self.meter_asr_loss, float(self.meter_asr_count)
+                self.meter_asr_loss, float(self.meter_asr_count),
+                self.meter_div_loss, self.meter_fid_loss
             ], device=self.args.device)
             
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             
             tts_sum, tts_cnt = metrics[0].item(), metrics[1].item()
             asr_sum, asr_cnt = metrics[2].item(), metrics[3].item()
+            div_sum, fid_sum = metrics[4].item(), metrics[5].item()
         else:
             tts_sum, tts_cnt = self.meter_tts_loss, self.meter_tts_count
             asr_sum, asr_cnt = self.meter_asr_loss, self.meter_asr_count
+            div_sum, fid_sum = self.meter_div_loss, self.meter_fid_loss
 
         logs["tts_loss"] = round(tts_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         logs["asr_loss"] = round(asr_sum / asr_cnt, 4) if asr_cnt > 0 else 0.0
+        logs["diversity_loss"] = round(div_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
+        logs["fidelity_loss"] = round(fid_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         
         self.meter_tts_loss = 0.0
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
         self.meter_asr_count = 0
+        self.meter_div_loss = 0.0
+        self.meter_fid_loss = 0.0
 
         super().log(logs)
 
@@ -343,7 +357,8 @@ def main():
         noise_size=model_args.noise_size,
         num_mlp_layers=model_args.num_mlp_layers,
         num_samples=model_args.num_samples,
-        beta=model_args.beta
+        beta=model_args.beta,
+        temperature=model_args.temperature
     )
     
     model = QwenCALM(calm_config)

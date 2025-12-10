@@ -71,10 +71,10 @@ class MLPGenerator(nn.Module):
         nn.init.constant_(self.final_layer.linears[-1].weight, 0)
         nn.init.constant_(self.final_layer.linears[-1].bias, 0)
 
-    def sample(self, hidden_states):
+    def sample(self, hidden_states, temperature=1.0):
         # hidden_states shape: [Batch, ..., HiddenDim]
-        noise = torch.rand((*hidden_states.shape[:-1], self.noise_size),
-                           dtype=hidden_states.dtype, device=hidden_states.device) - 0.5
+        noise = (torch.rand((*hidden_states.shape[:-1], self.noise_size),
+                           dtype=hidden_states.dtype, device=hidden_states.device) - 0.5) * temperature
         
         noise_embds = self.norm_noise(self.noise_embd(noise))
         hidden_states_norm = self.norm_hidden(self.hidden_embd(hidden_states))
@@ -100,7 +100,8 @@ class QwenCALMConfig(PretrainedConfig):
                  noise_size=64,
                  num_mlp_layers=2,
                  num_samples=8,      # Number of samples to draw during training
-                 beta=0.25,          # Energy distance exponent
+                 beta=0.25,
+                 temperature=1.0,
                  **kwargs):
         super().__init__(**kwargs)
         self.qwen_path = qwen_path
@@ -111,6 +112,7 @@ class QwenCALMConfig(PretrainedConfig):
         self.num_mlp_layers = num_mlp_layers
         self.num_samples = num_samples
         self.beta = beta
+        self.temperature = temperature
 
 class QwenCALM(PreTrainedModel):
     config_class = QwenCALMConfig
@@ -145,7 +147,6 @@ class QwenCALM(PreTrainedModel):
         qwen_dim = self.llm.config.hidden_size
         self.input_proj = nn.Linear(vae_latent_dim, qwen_dim)
         
-        # [CHANGE] Replace GMMHead with MLPGenerator
         self.output_head = MLPGenerator(
             input_dim=qwen_dim, 
             output_dim=vae_latent_dim,
@@ -157,6 +158,7 @@ class QwenCALM(PreTrainedModel):
         # Energy Loss parameters
         self.num_samples = config.num_samples
         self.beta = config.beta
+        self.temperature = config.temperature
         
         nn.init.normal_(self.input_proj.weight, std=0.02)
 
@@ -197,7 +199,7 @@ class QwenCALM(PreTrainedModel):
         
         score = distance_x - distance_y * 2
         
-        return score
+        return score, distance_x, distance_y
 
     def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None):
         batch_size = text_input_ids.shape[0]
@@ -256,6 +258,8 @@ class QwenCALM(PreTrainedModel):
         valid_samples = 0
         accum_tts_loss = torch.tensor(0.0, device=device)
         accum_asr_loss = torch.tensor(0.0, device=device)
+        accum_div_loss = torch.tensor(0.0, device=device)
+        accum_fid_loss = torch.tensor(0.0, device=device)
         tts_count = 0
         asr_count = 0
         
@@ -306,15 +310,20 @@ class QwenCALM(PreTrainedModel):
                 hidden_repeated = valid_hidden.unsqueeze(0).repeat(self.num_samples, 1, 1)
                 
                 # Generate predictions
-                latent_pred = self.output_head.sample(hidden_repeated)
-
+                latent_pred = self.output_head.sample(hidden_repeated, temperature=self.temperature)
+                
                 # Calculate Energy Score (we minimize NEGATIVE score)
-                raw_score = -self.energy_score(latent_pred, valid_gt_mean, valid_gt_log_std)
-
-                tts_step_loss = raw_score.mean()
+                raw_score, raw_div, raw_fid = self.energy_score(latent_pred, valid_gt_mean, valid_gt_log_std)
+                
+                tts_step_loss = -raw_score.mean()
+                div_val = raw_div.mean()
+                fid_val = raw_fid.mean()
                 
                 total_loss += tts_step_loss
                 accum_tts_loss += tts_step_loss
+                accum_div_loss += div_val
+                accum_fid_loss += fid_val
+                
                 tts_count += 1
                 valid_samples += 1
 
@@ -382,11 +391,15 @@ class QwenCALM(PreTrainedModel):
             
         avg_tts = accum_tts_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
         avg_asr = accum_asr_loss / asr_count if asr_count > 0 else torch.tensor(0.0, device=device)
-
+        avg_div = accum_div_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
+        avg_fid = accum_fid_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
+        
         return {
             "loss": total_loss,
             "loss_tts": avg_tts,
             "loss_asr": avg_asr,
+            "loss_diversity": avg_div,
+            "loss_fidelity": avg_fid,
             "logits": None 
         }
     

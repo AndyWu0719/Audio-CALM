@@ -24,6 +24,7 @@ NOISE_SIZE=64
 MLP_LAYERS=2
 NUM_SAMPLES=4
 BETA=0.25
+TEMPERATURE=1.0
 LR=5e-5
 LR_TAG=${LR//./p}
 RUN_NAME="${LATENT_DOWN}-${NUM_SAMPLES}-${LATENT_DIM}-${LR_TAG}"
@@ -47,6 +48,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --num_mlp_layers $MLP_LAYERS \
     --num_samples $NUM_SAMPLES \
     --beta $BETA \
+    --temperature $TEMPERATURE \
     --learning_rate $LR \
     \
     --qwen_path "$QWEN_PATH" \
