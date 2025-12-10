@@ -11,7 +11,7 @@ class AudioVAEConfig(PretrainedConfig):
         in_channels=80, 
         hidden_channels=512, 
         latent_channels=64, 
-        strides: List[int] = [2, 2], 
+        strides: List[int] = [2, 2, 2, 2], 
         kl_weight=0.0001,
         norm_num_groups=32, # [新增] GroupNorm 的分组数
         **kwargs
@@ -49,6 +49,7 @@ class AcousticVAE(PreTrainedModel):
         self.strides = config.strides
         self.total_stride = 1
         for s in self.strides: self.total_stride *= s
+        print(f"[AcousticVAE] Total Downsampling Stride: {self.total_stride}")
         
         # === 1. Encoder ===
         encoder_layers = []

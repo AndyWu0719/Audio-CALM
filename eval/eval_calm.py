@@ -120,7 +120,6 @@ def transcribe_audio(model, tokenizer, mel, device="cuda"):
     with torch.no_grad():
         mu, _ = model.vae.encode(mel)
         latents = mu.transpose(1, 2) # [1, T_lat, 64]
-        # 转为 LLM 精度
         latents = latents.to(model.input_proj.weight.dtype)
         audio_embeds = model.input_proj(latents)
         
@@ -131,13 +130,10 @@ def transcribe_audio(model, tokenizer, mel, device="cuda"):
         
     inputs_embeds = torch.cat([audio_embeds, prompt_embeds], dim=1)
     
-    # [关键修复] 构造 Dummy input_ids 和 Attention Mask
-    # 否则 generate 会因为无法推断长度而报错
     B, T, _ = inputs_embeds.shape
     dummy_ids = torch.full((B, T), tokenizer.pad_token_id, dtype=torch.long, device=device)
     attention_mask = torch.ones((B, T), dtype=torch.long, device=device)
     
-    # 获取 EOS token id
     eos_token_id = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
 
     with torch.no_grad():
@@ -238,8 +234,10 @@ def main():
         mel_gt = torch.load(item['mel_path']).to(device).to(torch.float32)
         
         # === Task 1: TTS Eval ===
-        target_len = mel_gt.shape[1] // 16
-        if target_len < 10: target_len = 50
+        vae_stride = getattr(model.vae, "total_stride", 16)
+        target_len = mel_gt.shape[1] // vae_stride
+        if target_len < 10:
+            target_len = 50
         
         gen_latents = generate_audio_from_text(model, tokenizer, text_gt, max_len=target_len, device=device)
         

@@ -126,12 +126,14 @@ class QwenCALM(PreTrainedModel):
         B_aud, T_aud, _ = gt_latents.shape
         if audio_lens is not None:
             if self.use_precomputed_latents:
-                # audio_lens 已经是 latent 长度
                 latent_lens = audio_lens
             else:
-                # Mel 长度 -> Latent 长度 (除以16)
-                downsample_rate = 16
-                latent_lens = torch.div(audio_lens + downsample_rate - 1, downsample_rate, rounding_mode='floor')
+                downsample_rate = getattr(self.vae, "total_stride", 16)
+                latent_lens = torch.div(
+                    audio_lens + downsample_rate - 1,
+                    downsample_rate,
+                    rounding_mode='floor'
+                )
             
             # 创建 Mask: [B, T_aud] (1 for valid, 0 for pad)
             audio_mask = torch.arange(T_aud, device=device)[None, :] < latent_lens[:, None]

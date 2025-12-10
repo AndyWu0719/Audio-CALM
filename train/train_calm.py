@@ -13,6 +13,7 @@ from transformers import Trainer, TrainingArguments, HfArgumentParser, set_seed,
 from torch.optim import AdamW
 from models.modeling_calm import QwenCALM, QwenCALMConfig
 from peft import LoraConfig, get_peft_model, TaskType
+from functools import partial
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -157,36 +158,26 @@ class CalmDataset(Dataset):
             "real_audio_len": real_audio_len
         }
 
-def data_collator(features):
+def data_collator(features, pad_id):
     valid_features = [f for f in features if f["audio_features"].shape[1] > 0]
-    if not valid_features: valid_features = features
-        
+    if not valid_features:
+        valid_features = features
+
     text_ids = [f["text_ids"] for f in valid_features]
     labels = [f["labels"] for f in valid_features]
-    
-    # Pad Token ID (从 valid_features 中无法直接获取 tokenizer，假设 eod 151643)
-    # 更好的做法是在 main 中把 tokenizer 传给 data_collator，或者硬编码
-    PAD_ID = 151643 
-    
-    # === Manual Left Padding ===
+
     max_len = max(len(t) for t in text_ids)
-    padded_text_ids = []
-    padded_labels = []
-    text_attention_masks = []
-    
+    padded_text_ids, padded_labels, text_attention_masks = [], [], []
+
     for t, l in zip(text_ids, labels):
         pad_len = max_len - len(t)
-        # Text: [Pad, ..., Pad, T1, T2...]
-        p_t = torch.cat([torch.full((pad_len,), PAD_ID, dtype=torch.long), t])
-        # Labels: [-100, ..., -100, L1, L2...]
+        p_t = torch.cat([torch.full((pad_len,), pad_id, dtype=torch.long), t])
         p_l = torch.cat([torch.full((pad_len,), -100, dtype=torch.long), l])
-        # Mask: [0, ..., 0, 1, 1...]
         mask = torch.cat([torch.zeros(pad_len, dtype=torch.long), torch.ones(len(t), dtype=torch.long)])
-        
         padded_text_ids.append(p_t)
         padded_labels.append(p_l)
         text_attention_masks.append(mask)
-        
+
     text_input_ids = torch.stack(padded_text_ids)
     labels_padded = torch.stack(padded_labels)
     attention_mask = torch.stack(text_attention_masks)
@@ -216,7 +207,7 @@ class CalmTrainer(Trainer):
             task_modes=inputs["task_modes"]
         )
         loss = outputs["loss"]
-        
+
         if self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 0:
              loss_tts = outputs.get("loss_tts", 0.0)
              loss_asr = outputs.get("loss_asr", 0.0)
@@ -359,7 +350,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=data_collator
+        data_collator=partial(data_collator, pad_id=tokenizer.pad_token_id)
     )
     
     if training_args.resume_from_checkpoint:
