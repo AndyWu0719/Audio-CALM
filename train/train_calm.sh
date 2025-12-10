@@ -14,14 +14,19 @@ TRAIN_DATA_DIR="${WORK_PATH}/data/latents/train"
 EVAL_DATA_DIR="${WORK_PATH}/data/latents/dev"
 
 LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeech/LibriSpeech"
-OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
 
 PER_DEVICE_BATCH_SIZE=2
 GRAD_ACCUM=16
-LR=5e-5                  # Projector: 1e-3
 
+LATENT_DOWN=16
 NUM_MIX=8
 LATENT_DIM=64
+LR=5e-5
+LR_TAG=${LR//./p}   # 5e-5 -> 5e-5 或 5p00000e-05，根据需要可自定义
+RUN_NAME="${LATENT_DOWN}-${NUM_MIX}-${LATENT_DIM}-${LR_TAG}"
+
+OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
+OUTPUT_DIR="${OUTPUT_DIR_BASE}/${RUN_NAME}"
 
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
 echo "Train Data Dir: $TRAIN_DATA_DIR"
@@ -29,7 +34,8 @@ echo "Eval Data Dir: $EVAL_DATA_DIR"
 
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --do_train \
-    --run_name "calm-latent-v1" \
+    --run_name "$RUN_NAME" \
+    --output_dir "$OUTPUT_DIR" \
     --report_to "tensorboard" \
     \
     --num_mixtures $NUM_MIX \
