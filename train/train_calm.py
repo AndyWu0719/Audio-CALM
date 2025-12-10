@@ -338,7 +338,6 @@ def main():
     calm_config = QwenCALMConfig(
         qwen_path=model_args.qwen_path,
         vae_path=model_args.vae_path,
-        num_mixtures=model_args.num_mixtures,
         use_precomputed_latents=model_args.use_precomputed_latents,
         latent_dim=model_args.latent_dim,
         noise_size=model_args.noise_size,
