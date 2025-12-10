@@ -47,13 +47,14 @@ class DataArguments:
     latent_downsample: int = field(default=4)
 
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16):
+    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16, is_eval=False):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
         self.use_latents = use_latents
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eod_id
         self.latent_downsample = latent_downsample
+        self.is_eval = is_eval
         
         self.data = []
         subset_list = subsets.split(",")
@@ -111,6 +112,11 @@ class CalmDataset(Dataset):
         try:
             item = self.data[idx]
             text_content = item['text']
+            
+            if self.is_eval:
+                task_mode = "tts" if idx % 2 == 0 else "asr"
+            else:
+                task_mode = "tts" if random.random() < 0.5 else "asr"
             
             # === Task ===
             task_mode = "tts" if random.random() < 0.5 else "asr"
@@ -210,6 +216,12 @@ class CalmTrainer(Trainer):
         self.meter_asr_count = 0
         self.meter_div_loss = 0.0
         self.meter_fid_loss = 0.0
+        
+        self.eval_meters = {}
+        
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        loss, logits, labels = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        return loss, logits, labels
 
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(
@@ -221,25 +233,58 @@ class CalmTrainer(Trainer):
             task_modes=inputs["task_modes"]
         )
         loss = outputs["loss"]
+        
+        avg_tts = outputs.get("loss_tts", torch.tensor(0.0)).item()
+        avg_asr = outputs.get("loss_asr", torch.tensor(0.0)).item()
+        avg_div = outputs.get("loss_diversity", torch.tensor(0.0)).item()
+        avg_fid = outputs.get("loss_fidelity", torch.tensor(0.0)).item()
+        
+        task_modes = inputs.get("task_modes", [])
+        num_tts = task_modes.count("tts")
+        num_asr = task_modes.count("asr")
 
         if self.model.training:
-            task_modes = inputs.get("task_modes", [])
-            num_tts = task_modes.count("tts")
-            num_asr = task_modes.count("asr")
-            
-            avg_tts = outputs.get("loss_tts", torch.tensor(0.0)).item()
-            avg_asr = outputs.get("loss_asr", torch.tensor(0.0)).item()
-            avg_div = outputs.get("loss_diversity", torch.tensor(0.0)).item()
-            avg_fid = outputs.get("loss_fidelity", torch.tensor(0.0)).item()
-            
             self.meter_tts_loss += avg_tts * num_tts
             self.meter_tts_count += num_tts
             self.meter_asr_loss += avg_asr * num_asr
             self.meter_asr_count += num_asr
             self.meter_div_loss += avg_div * num_tts
             self.meter_fid_loss += avg_fid * num_tts
+        else:
+            if "eval_tts_loss" not in self.eval_meters:
+                self.eval_meters = {
+                    "eval_tts_loss": 0.0, "eval_tts_count": 0,
+                    "eval_asr_loss": 0.0, "eval_asr_count": 0,
+                    "eval_div_loss": 0.0, "eval_fid_loss": 0.0
+                }
+            
+            self.eval_meters["eval_tts_loss"] += avg_tts * num_tts
+            self.eval_meters["eval_tts_count"] += num_tts
+            self.eval_meters["eval_asr_loss"] += avg_asr * num_asr
+            self.eval_meters["eval_asr_count"] += num_asr
+            self.eval_meters["eval_div_loss"] += avg_div * num_tts
+            self.eval_meters["eval_fid_loss"] += avg_fid * num_tts
              
         return (loss, outputs) if return_outputs else loss
+    
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        self.eval_meters = {}
+        
+        output = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        
+        if "eval_tts_count" in self.eval_meters and self.eval_meters["eval_tts_count"] > 0:
+            count = self.eval_meters["eval_tts_count"]
+            output[f"{metric_key_prefix}_tts_loss"] = self.eval_meters["eval_tts_loss"] / count
+            output[f"{metric_key_prefix}_div_loss"] = self.eval_meters["eval_div_loss"] / count
+            output[f"{metric_key_prefix}_fid_loss"] = self.eval_meters["eval_fid_loss"] / count
+        
+        if "eval_asr_count" in self.eval_meters and self.eval_meters["eval_asr_count"] > 0:
+            count = self.eval_meters["eval_asr_count"]
+            output[f"{metric_key_prefix}_asr_loss"] = self.eval_meters["eval_asr_loss"] / count
+
+        self.log(output)
+        
+        return output
     
     def log(self, logs: Dict[str, float]) -> None:
         if self.args.world_size > 1:
@@ -385,7 +430,8 @@ def main():
         max_text_len=data_args.max_text_len,
         max_audio_len=data_args.max_audio_len,
         use_latents=model_args.use_precomputed_latents,
-        latent_downsample=data_args.latent_downsample
+        latent_downsample=data_args.latent_downsample,
+        is_eval=False
     )
 
     eval_dir = data_args.eval_mel_dir if data_args.eval_mel_dir else data_args.mel_dir
@@ -397,7 +443,8 @@ def main():
         max_text_len=data_args.max_text_len,
         max_audio_len=data_args.max_audio_len,
         use_latents=model_args.use_precomputed_latents,
-        latent_downsample=data_args.latent_downsample
+        latent_downsample=data_args.latent_downsample,
+        is_eval=True
     )
     
     trainer = CalmTrainer(
