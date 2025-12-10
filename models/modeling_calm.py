@@ -172,7 +172,16 @@ class QwenCALM(PreTrainedModel):
             # 拼接 Mask
             full_mask = torch.cat([sub_text_mask, sub_audio_mask[:, :-1]], dim=1)
             
-            out = self.llm(inputs_embeds=inp, attention_mask=full_mask, output_hidden_states=True)
+            position_ids = full_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(full_mask == 0, 1)
+            
+            # 传入 position_ids
+            out = self.llm(
+                inputs_embeds=inp, 
+                attention_mask=full_mask, 
+                position_ids=position_ids, 
+                output_hidden_states=True
+            )
             last_hidden = out.hidden_states[-1]
             
             txt_len = sub_text.shape[1]
@@ -226,7 +235,16 @@ class QwenCALM(PreTrainedModel):
             prefix_labels = torch.full((B_sub, T_aud), -100, dtype=torch.long, device=device)
             full_labels = torch.cat([prefix_labels, sub_labels], dim=1)
             
-            out = self.llm(inputs_embeds=inp, attention_mask=full_mask, output_hidden_states=True)
+            position_ids = full_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(full_mask == 0, 1)
+            
+            # 传入 position_ids
+            out = self.llm(
+                inputs_embeds=inp, 
+                attention_mask=full_mask, 
+                position_ids=position_ids,
+                output_hidden_states=True
+            )
             
             logits = self.llm.lm_head(out.hidden_states[-1])
             

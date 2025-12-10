@@ -259,7 +259,7 @@ class CalmTrainer(Trainer):
                 {
                     "params": decay_parameters,
                     "weight_decay": self.args.weight_decay,
-                    "lr": self.args.learning_rate, 
+                    "lr": self.args.learning_rate,
                 },
                 {
                     "params": no_decay_parameters,
