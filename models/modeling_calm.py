@@ -26,23 +26,23 @@ class GMMHead(nn.Module):
         
         return pi_logits, mu, log_sigma
 
-def gmm_loss(target, pi_logits, mu, log_sigma):
-    target = target.float()
-    pi_logits = pi_logits.float()
-    mu = mu.float()
-    log_sigma = log_sigma.float()
-    
-    B, S, D = target.shape
-    target = target.unsqueeze(2) 
-    
+def masked_gmm_loss(target, pi_logits, mu, log_sigma, mask):
+    target = target.float()          # [B,S,D]
+    pi_logits = pi_logits.float()    # [B,S,K]
+    mu = mu.float()                  # [B,S,K,D]
+    log_sigma = log_sigma.float()    # [B,S,K,D]
+    mask = mask.bool()               # [B,S]
+
     var = torch.exp(2 * log_sigma)
-    log_prob_comp = -0.5 * ((target - mu)**2 / var) - log_sigma - 0.5 * math.log(2 * math.pi)
-    log_prob_comp = log_prob_comp.sum(dim=-1)
-    
+    log_prob_comp = -0.5 * ((target.unsqueeze(2) - mu) ** 2 / var) - log_sigma - 0.5 * math.log(2 * math.pi)
+    log_prob_comp = log_prob_comp.sum(dim=-1)              # [B,S,K]
+
     log_pi = F.log_softmax(pi_logits, dim=-1)
-    log_likelihood = torch.logsumexp(log_pi + log_prob_comp, dim=-1)
-    
-    return -torch.mean(log_likelihood)
+    log_likelihood = torch.logsumexp(log_pi + log_prob_comp, dim=-1)  # [B,S]
+
+    log_likelihood = log_likelihood * mask
+    denom = mask.sum().clamp(min=1)
+    return -(log_likelihood.sum() / denom)
 
 class QwenCALMConfig(PretrainedConfig):
     model_type = "qwen_calm"
@@ -70,7 +70,7 @@ class QwenCALM(PreTrainedModel):
         
         self.use_precomputed_latents = config.use_precomputed_latents
         
-        vae_latent_dim = 64 # 默认值
+        vae_latent_dim = 64
         
         if not self.use_precomputed_latents:
             print(f"Loading VAE from {config.vae_path}...")
@@ -101,9 +101,9 @@ class QwenCALM(PreTrainedModel):
     def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None):
         """
         text_input_ids: [B, T_text] (Left padded)
-        audio_features: [B, D, T] (可以是 Mel 也可以是 Latent，取决于 config)
+        audio_features: [B, D, T] (Mel or Latent)
         attention_mask: [B, T_text] (Text Mask)
-        audio_lens: [B] (真实长度)
+        audio_lens: [B] (True lengths of audio features before padding)
         """
         batch_size = text_input_ids.shape[0]
         device = text_input_ids.device
@@ -111,18 +111,18 @@ class QwenCALM(PreTrainedModel):
         if task_modes is None:
             task_modes = ["tts"] * batch_size
 
-        # 1. 获取 Latents
+        # 1. Latents
         with torch.no_grad():
             if self.use_precomputed_latents:
-                # audio_features 是 latents [B, 64, T] -> 转置为 [B, T, 64]
-                # 这里假设 dataset 返回的是 [64, T]，并在 collator 堆叠成 [B, 64, T]
+                # audio_features: latents [B, 64, T] -> [B, T, 64]
+                # dataset: [64, T] -> collator: [B, 64, T]
                 gt_latents = audio_features.transpose(1, 2)
             else:
-                # 实时计算 VAE: audio_features 是 Mel [B, 80, T]
+                # audio_features: Mel [B, 80, T]
                 mu, _ = self.vae.encode(audio_features) 
                 gt_latents = mu.transpose(1, 2)
 
-        # 2. 构造 Audio Mask
+        # 2. Audio Mask
         B_aud, T_aud, _ = gt_latents.shape
         if audio_lens is not None:
             if self.use_precomputed_latents:
@@ -135,7 +135,7 @@ class QwenCALM(PreTrainedModel):
                     rounding_mode='floor'
                 )
             
-            # 创建 Mask: [B, T_aud] (1 for valid, 0 for pad)
+            # Mask: [B, T_aud] (1 for valid, 0 for pad)
             audio_mask = torch.arange(T_aud, device=device)[None, :] < latent_lens[:, None]
             audio_mask = audio_mask.to(dtype=torch.long)
         else:
@@ -168,20 +168,20 @@ class QwenCALM(PreTrainedModel):
             sub_audio_mask = audio_mask[idx]
             
             # Input: Text + Audio_Prefix
-            # Text 是 Left Padded: [Pad, Text]
-            # Audio 是 Right Padded: [Audio, Pad]
-            # 拼接时：[Pad, Text, Audio, Pad] (最后一个Pad不参与预测)
+            # Text: Left Padded: [Pad, Text]
+            # Audio: Right Padded: [Audio, Pad]
+            # [Pad, Text, Audio, Pad] (No last Pad)
             
-            # 取 Audio 的前 T-1 帧作为 Input
+            # Input frame: Audio 0, ..., Audio T-2
             inp = torch.cat([sub_text, sub_audio[:, :-1, :]], dim=1)
             
-            # 拼接 Mask
+            # Splicing Mask
             full_mask = torch.cat([sub_text_mask, sub_audio_mask[:, :-1]], dim=1)
             
             position_ids = full_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(full_mask == 0, 1)
             
-            # 传入 position_ids
+            # Pass in position_ids
             out = self.llm(
                 inputs_embeds=inp, 
                 attention_mask=full_mask, 
@@ -195,32 +195,14 @@ class QwenCALM(PreTrainedModel):
             
             pi, mu, log_sigma = self.output_head(audio_hidden)
             
-            # 计算 Loss (简单平均，忽略 Mask 为 0 的部分)
-            # 更好的做法是用 Mask 过滤
-            valid_len_mask = sub_audio_mask.bool()
+            # Calculate Loss (simple average, ignoring Mask == 0 parts)
+            tts_mask = sub_audio_mask[:, :sub_gt.size(1)].bool()  # [B, T_aud]
+            tts_step_loss = masked_gmm_loss(sub_gt, pi, mu, log_sigma, tts_mask)
             
-            # 这里简化处理：循环计算 Valid Loss
-            loss_list = []
-            for b_i in range(len(idx)):
-                # 获取该样本的有效 Latent 长度
-                curr_len = sub_audio_mask[b_i].sum().item()
-                if curr_len > 0:
-                    l = gmm_loss(
-                        sub_gt[b_i:b_i+1, :curr_len, :],
-                        pi[b_i:b_i+1, :curr_len, :],
-                        mu[b_i:b_i+1, :curr_len, :, :],
-                        log_sigma[b_i:b_i+1, :curr_len, :, :]
-                    )
-                    loss_list.append(l)
-            
-            if len(loss_list) > 0:
-                tts_step_loss = torch.stack(loss_list).mean()
-                total_loss += tts_step_loss
-                valid_samples += 1
-                
-                # 记录分项
-                accum_tts_loss += tts_step_loss
-                tts_count += 1
+            total_loss += tts_step_loss
+            valid_samples += 1
+            accum_tts_loss += tts_step_loss
+            tts_count += 1
 
         # === ASR (Audio -> Text) ===
         asr_indices = [i for i, m in enumerate(task_modes) if m == "asr"]
@@ -238,7 +220,7 @@ class QwenCALM(PreTrainedModel):
             inp = torch.cat([sub_audio, sub_text], dim=1)
             
             # Full Mask: [Audio_Mask, Text_Mask]
-            # Audio Mask 会屏蔽掉 Audio 的 Padding
+            # Audio Mask will mask Audio Padding
             full_mask = torch.cat([sub_audio_mask, sub_text_mask], dim=1)
             
             # Labels
@@ -249,7 +231,7 @@ class QwenCALM(PreTrainedModel):
             position_ids = full_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(full_mask == 0, 1)
             
-            # 传入 position_ids
+            # Pass in position_ids
             out = self.llm(
                 inputs_embeds=inp, 
                 attention_mask=full_mask, 
