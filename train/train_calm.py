@@ -3,7 +3,8 @@ import sys
 import torch
 import random
 from dataclasses import dataclass, field
-from typing import List
+import torch.distributed as dist
+from typing import List, Dict
 from glob import glob
 
 sys.path.append(os.getcwd())
@@ -197,6 +198,13 @@ def data_collator(features, pad_id):
     }
 
 class CalmTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.meter_tts_loss = 0.0
+        self.meter_tts_count = 0
+        self.meter_asr_loss = 0.0
+        self.meter_asr_count = 0
+
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(
             text_input_ids=inputs["text_input_ids"],
@@ -208,16 +216,45 @@ class CalmTrainer(Trainer):
         )
         loss = outputs["loss"]
 
-        if self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 0:
-             loss_tts = outputs.get("loss_tts", 0.0)
-             loss_asr = outputs.get("loss_asr", 0.0)
-             if isinstance(loss_tts, torch.Tensor): loss_tts = loss_tts.item()
-             if isinstance(loss_asr, torch.Tensor): loss_asr = loss_asr.item()
+        if self.model.training:
+            task_modes = inputs.get("task_modes", [])
+            num_tts = task_modes.count("tts")
+            num_asr = task_modes.count("asr")
+            
+            avg_tts = outputs.get("loss_tts", torch.tensor(0.0)).item()
+            avg_asr = outputs.get("loss_asr", torch.tensor(0.0)).item()
+            
+            self.meter_tts_loss += avg_tts * num_tts
+            self.meter_tts_count += num_tts
+            self.meter_asr_loss += avg_asr * num_asr
+            self.meter_asr_count += num_asr
              
-             if self.args.local_rank in [-1, 0]:
-                 print(f" [Step {self.state.global_step}] Loss: {loss.item():.4f} | TTS: {loss_tts:.4f} | ASR: {loss_asr:.4f}")
-
         return (loss, outputs) if return_outputs else loss
+    
+    def log(self, logs: Dict[str, float]) -> None:
+        if self.args.world_size > 1:
+            metrics = torch.tensor([
+                self.meter_tts_loss, float(self.meter_tts_count),
+                self.meter_asr_loss, float(self.meter_asr_count)
+            ], device=self.args.device)
+            
+            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            
+            tts_sum, tts_cnt = metrics[0].item(), metrics[1].item()
+            asr_sum, asr_cnt = metrics[2].item(), metrics[3].item()
+        else:
+            tts_sum, tts_cnt = self.meter_tts_loss, self.meter_tts_count
+            asr_sum, asr_cnt = self.meter_asr_loss, self.meter_asr_count
+
+        logs["tts_loss"] = round(tts_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
+        logs["asr_loss"] = round(asr_sum / asr_cnt, 4) if asr_cnt > 0 else 0.0
+        
+        self.meter_tts_loss = 0.0
+        self.meter_tts_count = 0
+        self.meter_asr_loss = 0.0
+        self.meter_asr_count = 0
+
+        super().log(logs)
 
     def create_optimizer(self):
         """
