@@ -28,7 +28,7 @@ from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy,
 
 import matplotlib.colors as mcolors
 from matplotlib.font_manager import FontProperties
-from process_data.audio import *
+from audio import *
 
 logger = logging.getLogger(__name__)
 

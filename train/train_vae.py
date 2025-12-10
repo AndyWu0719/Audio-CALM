@@ -5,14 +5,12 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from glob import glob
 
-# 确保能导入 models
 sys.path.append(os.getcwd()) 
 
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments, HfArgumentParser, set_seed
 from models.modeling_vae import AcousticVAE, AudioVAEConfig
 
-# === 1. 定义参数类 ===
 @dataclass
 class ModelArguments:
     hidden_channels: int = field(default=512, metadata={"help": "Hidden channels in VAE"})
@@ -24,7 +22,6 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     data_dir: str = field(default="./data/mel_features", metadata={"help": "Root path to processed .pt files"})
-    # [新增] 指定要使用的子数据集，用逗号分隔
     train_subsets: str = field(default="train-clean-100,train-clean-360,train-other-500", metadata={"help": "Subdirectories to use for training"})
     eval_subsets: str = field(default="dev-clean", metadata={"help": "Subdirectories to use for evaluation"})
     crop_size: int = field(default=256, metadata={"help": "Crop size (frames) for training"})
@@ -36,16 +33,13 @@ class MelDataset(Dataset):
         self.is_eval = is_eval
             
         if subsets:
-            # 如果指定了子集，只加载这些子集
             subset_list = subsets.split(",")
             for subset in subset_list:
                 subset_path = os.path.join(data_dir, subset.strip())
-                # 搜索该子集下的文件
                 subset_files = glob(os.path.join(subset_path, "*.pt"))
                 self.files.extend(subset_files)
                 print(f"Loaded {len(subset_files)} files from {subset}")
         else:
-            # 否则递归搜索所有
             self.files = glob(os.path.join(data_dir, "**", "*.pt"), recursive=True)
 
         if len(self.files) == 0:
@@ -60,9 +54,9 @@ class MelDataset(Dataset):
     def __getitem__(self, idx):
         try:
             # Load: [80, T]
-            mel = torch.load(self.files[idx], map_location="cpu") # 放在 CPU 上，只有 batch 时才上 GPU
+            mel = torch.load(self.files[idx], map_location="cpu")
             
-            # Random Crop (训练时必须定长以进行 Batching)
+            # Random Crop
             if mel.shape[1] > self.crop_size:
                 if self.is_eval:
                     # Center Crop
@@ -79,7 +73,6 @@ class MelDataset(Dataset):
             return {"input_mel": mel}
         except Exception as e:
             print(f"Error loading {self.files[idx]}: {e}")
-            # 返回一个随机噪音防止训练中断 (权宜之计)
             return {"input_mel": torch.randn(80, self.crop_size)}
 
 # === 3. Collator & Trainer ===
@@ -110,22 +103,19 @@ def main():
     
     set_seed(training_args.seed)
     
-    # 1. 初始化模型配置
     print(f"Initializing VAE with strides: {model_args.strides}, latent: {model_args.latent_channels}")
     config = AudioVAEConfig(
         hidden_channels=model_args.hidden_channels, 
         latent_channels=model_args.latent_channels,
-        strides=model_args.strides, # [关键] 动态传入
+        strides=model_args.strides,
         kl_weight=model_args.kl_weight
     )
     model = AcousticVAE(config)
     
-    # 打印模型总压缩率
     total_stride = 1
     for s in model_args.strides: total_stride *= s
     print(f"Total Compression Rate: {total_stride}x")
     
-    # 2. 准备数据
     print(f"Loading Training Data from: {data_args.train_subsets}")
     train_dataset = MelDataset(
         data_dir=data_args.data_dir, 
@@ -134,7 +124,6 @@ def main():
         is_eval=False
     )
 
-    # [新增] 准备验证数据
     print(f"Loading Evaluation Data from: {data_args.eval_subsets}")
     eval_dataset = MelDataset(
         data_dir=data_args.data_dir, 
@@ -143,7 +132,6 @@ def main():
         is_eval=True
     )
     
-    # 3. 开始训练
     trainer = VAETrainer(
         model=model,
         args=training_args,
@@ -159,7 +147,6 @@ def main():
         trainer.train()
         
     trainer.save_model(training_args.output_dir)
-    # 保存 Config 以便推理时加载
     config.save_pretrained(training_args.output_dir)
 
 if __name__ == "__main__":

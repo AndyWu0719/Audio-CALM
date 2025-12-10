@@ -36,9 +36,7 @@ def main():
     
     files = glob(os.path.join(args.mel_dir, "**", "*.pt"), recursive=True)
     
-    # 使用 tqdm 显示进度
     for f in tqdm(files, desc="Indexing & Verifying"):
-        # [修改] 增加深度校验，确保写入 JSONL 的文件一定能用
         if not is_valid_pt_file(f):
             print(f"Skipping corrupt file: {f}")
             continue

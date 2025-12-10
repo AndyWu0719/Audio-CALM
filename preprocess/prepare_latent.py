@@ -11,14 +11,8 @@ sys.path.append(os.getcwd())
 from models.modeling_vae import AcousticVAE
 
 def process_files(rank, gpu_id, file_list, args):
-    """
-    单个进程的工作函数
-    """
-    # 设置当前进程使用的 GPU
     device = torch.device(f"cuda:{gpu_id}")
     
-    # 加载模型到指定 GPU
-    # print(f"[Rank {rank}] Loading VAE on {device}...")
     try:
         vae = AcousticVAE.from_pretrained(args.vae_path).to(device)
         vae.eval()
@@ -26,18 +20,13 @@ def process_files(rank, gpu_id, file_list, args):
         print(f"[Rank {rank}] Failed to load model: {e}")
         return
 
-    # 进度条只在 Rank 0 显示，或者每个进程显示简单的进度
     iterator = tqdm(file_list, desc=f"Rank {rank} (GPU {gpu_id})", position=rank)
 
     for f_path in iterator:
         try:
-            # 构造输出路径
-            # 假设结构是 args.mel_dir/subset/filename.pt
-            # 我们需要提取 subset 部分
             rel_path = os.path.relpath(f_path, args.mel_dir)
             out_path = os.path.join(args.output_dir, rel_path)
             
-            # 如果已存在且不覆盖，跳过
             if os.path.exists(out_path):
                 continue
 
@@ -68,7 +57,6 @@ def main():
     parser.add_argument("--workers_per_gpu", type=int, default=2, help="Number of processes per GPU")
     args = parser.parse_args()
 
-    # 1. 收集所有需要处理的文件
     if args.subsets:
         subsets = args.subsets
     else:
@@ -88,23 +76,19 @@ def main():
     if total_files == 0:
         return
 
-    # 2. 确定总进程数
     num_gpus = min(args.num_gpus, torch.cuda.device_count())
     num_processes = num_gpus * args.workers_per_gpu
     
     print(f"Launching {num_processes} processes on {num_gpus} GPUs ({args.workers_per_gpu} workers/GPU)...")
 
-    # 3. 分割文件列表
     chunk_size = math.ceil(total_files / num_processes)
     file_chunks = [all_files[i:i + chunk_size] for i in range(0, total_files, chunk_size)]
 
-    # 4. 启动多进程
     mp.set_start_method('spawn', force=True)
     processes = []
     
     for rank in range(num_processes):
         gpu_id = rank % num_gpus
-        # 处理最后一个 chunk 可能为空的情况
         if rank < len(file_chunks):
             p = mp.Process(
                 target=process_files,

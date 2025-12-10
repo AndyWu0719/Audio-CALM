@@ -13,7 +13,7 @@ class AudioVAEConfig(PretrainedConfig):
         latent_channels=64, 
         strides: List[int] = [2, 2, 2, 2], 
         kl_weight=0.0001,
-        norm_num_groups=32, # [新增] GroupNorm 的分组数
+        norm_num_groups=32,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -24,12 +24,11 @@ class AudioVAEConfig(PretrainedConfig):
         self.kl_weight = kl_weight
         self.norm_num_groups = norm_num_groups
 
-# [改进] 升级版 ResBlock：加入 GroupNorm
 class ResBlock(nn.Module):
     def __init__(self, channels, num_groups=32):
         super().__init__()
         self.conv = nn.Sequential(
-            # Norm -> Act -> Conv (Pre-activation 结构通常更稳定)
+            # Norm -> Act -> Conv
             nn.GroupNorm(num_groups, channels, eps=1e-6),
             nn.GELU(),
             nn.Conv1d(channels, channels, 3, 1, 1),
@@ -55,7 +54,7 @@ class AcousticVAE(PreTrainedModel):
         encoder_layers = []
         current_channels = config.in_channels
         
-        # 第一层卷积先升维，不归一化，保留原始特征分布
+        # First convolution layer to increase dimension, no normalization to preserve original feature distribution
         encoder_layers.append(
             nn.Conv1d(config.in_channels, config.hidden_channels, 3, 1, 1)
         )
@@ -66,7 +65,7 @@ class AcousticVAE(PreTrainedModel):
             padding = stride // 2
             encoder_layers.append(
                 nn.Sequential(
-                    # 下采样卷积
+                    # Downsampling convolution
                     nn.Conv1d(
                         current_channels, 
                         config.hidden_channels, 
@@ -74,7 +73,7 @@ class AcousticVAE(PreTrainedModel):
                         stride=stride, 
                         padding=padding
                     ),
-                    # 残差块 (带 Norm)
+                    # Residual block (with Norm)
                     ResBlock(config.hidden_channels, config.norm_num_groups)
                 )
             )
@@ -115,11 +114,10 @@ class AcousticVAE(PreTrainedModel):
             )
             
         # Output Layer
-        # [关键] 最后一层不加 Norm，也不加激活函数，保持线性输出以拟合 Log-Mel 的任意值
+        # [Key] The last layer does not add Norm or activation function, keeping linear output to fit any value of Log-Mel
         self.decoder_net = nn.Sequential(*decoder_layers)
         self.final_proj = nn.Conv1d(config.hidden_channels, config.in_channels, 3, 1, 1)
 
-    # ... (encode, reparameterize, decode 函数保持不变) ...
     def encode(self, x):
         h = self.encoder(x)
         mu, logvar = torch.chunk(h, 2, dim=1)

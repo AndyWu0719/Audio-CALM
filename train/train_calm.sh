@@ -1,12 +1,10 @@
 #!/bin/bash
 
-# === 环境变量配置 ===
 export OMP_NUM_THREADS=8
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 MASTER_PORT=29505
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
-# === 路径配置 ===
 WORK_PATH=$(pwd)
 QWEN_PATH="${WORK_PATH}/qwen_audio_pretrained"
 VAE_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_16x/checkpoint-54000" 
@@ -17,15 +15,14 @@ EVAL_DATA_DIR="${WORK_PATH}/data/latents/dev"
 LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeech/LibriSpeech"
 OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
 
-# === 训练参数 ===
 PER_DEVICE_BATCH_SIZE=1
 GRAD_ACCUM=32
 LR=5e-5                  # Projector: 1e-3
 
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
-echo "Data Dir: $DATA_DIR"
+echo "Train Data Dir: $TRAIN_DATA_DIR"
+echo "Eval Data Dir: $EVAL_DATA_DIR"
 
-# 运行训练
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --qwen_path "$QWEN_PATH" \
     --vae_path "$VAE_PATH" \
@@ -54,9 +51,13 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --use_precomputed_latents True \
     --evaluation_strategy "steps" \
     --eval_steps 500 \
-    --metric_for_best_model "loss" \
     --save_total_limit 2 \
     --remove_unused_columns False \
+    --latent_downsample 16 \
+    --save_strategy "eval" \
+    --load_best_model_at_end True \
+    --metric_for_best_model eval_loss \
+    --greater_is_better False \
     --do_train
 
 echo "Training finished."

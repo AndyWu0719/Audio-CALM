@@ -1,25 +1,17 @@
 #!/bin/bash
 
-# === 环境设置 ===
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export OMP_NUM_THREADS=8
-# 如果遇到端口冲突，修改这个端口
 MASTER_PORT=29500 
 
-# === 路径设置 ===
 WORK_PATH=$(pwd)
 DATA_DIR="${WORK_PATH}/data/mel_features" 
 OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/audio_vae_16x"
 
-# === 训练超参数 ===
-# 压缩策略: [2, 2, 2, 2] = 16x 压缩
-# 输入帧率 ~62.5Hz (16ms) -> Latent 帧率 ~3.9Hz
-# 这种高压缩率对 LLM 极度友好，序列非常短
 STRIDES="2 2 2 2" 
 LATENT_DIM=64
 HIDDEN_DIM=512
 
-# 显存优化: 4090 (24G) 可以开大 Batch Size
 BATCH_SIZE=64
 GRAD_ACCUM=1
 LR=2e-4

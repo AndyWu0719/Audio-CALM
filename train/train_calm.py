@@ -27,7 +27,6 @@ class ModelArguments:
     lora_rank: int = field(default=64, metadata={"help": "LoRA Rank"})
     lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
-    # 新增参数
     use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk to speed up training."})
 
 @dataclass
@@ -39,22 +38,22 @@ class DataArguments:
     eval_subsets: str = field(default="dev-clean")
     max_text_len: int = field(default=256)
     max_audio_len: int = field(default=2048, metadata={"help": "Max Mel frames. If using latents, this will be scaled down by 16 automatically inside dataset logic."})
+    latent_downsample: int = field(default=256)
 
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False):
+    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
         self.use_latents = use_latents
-        
-        # 优先使用 eod 作为 pad，如果没有则用 pad_token_id
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eod_id
+        self.latent_downsample = latent_downsample
         
         self.data = []
         subset_list = subsets.split(",")
         print(f"Scanning pairs in {subset_list}...")
         
-        # 1. 建立文件索引
+        # 1. Build file index
         file_index = {}
         for subset in subset_list:
             subset_dir = os.path.join(data_dir, subset.strip())
@@ -69,7 +68,7 @@ class CalmDataset(Dataset):
         
         print(f"Indexed {len(file_index)} audio files.")
         
-        # 2. 扫描文本
+        # 2. Scan text
         for subset in subset_list:
             subset_dir = os.path.join(librispeech_root, subset.strip())
             if not os.path.exists(subset_dir): continue
@@ -97,7 +96,6 @@ class CalmDataset(Dataset):
         return len(self.data)
     
     def __getitem__(self, idx):
-        # 默认值
         text_ids = [self.pad_id]
         labels = [-100]
         audio = torch.zeros(64 if self.use_latents else 80, 10)
@@ -127,13 +125,13 @@ class CalmDataset(Dataset):
                 labels = labels[:self.max_text_len]
 
             # === Audio ===
-            # Load: 如果是 latents, shape [64, T]; 如果是 mel, shape [80, T]
+            # Load: latents, shape [64, T] or mel, shape [80, T]
             audio = torch.load(item['file_path'], map_location="cpu") 
             
-            # 计算 Target Length
+            # Calculate Target Length
             if self.use_latents:
-                # Max Audio Len 指的是 Mel 帧数，Latent 应该是 / 16
-                TARGET_LEN = self.max_audio_len // 16
+                # Max Audio Len refers to Mel frames, Latent should be / total_stride
+                TARGET_LEN = self.max_audio_len // self.latent_downsample
             else:
                 TARGET_LEN = self.max_audio_len
 
@@ -146,7 +144,7 @@ class CalmDataset(Dataset):
             else:
                 pad_len = TARGET_LEN - audio.shape[1]
                 audio = torch.nn.functional.pad(audio, (0, pad_len))
-                # real_audio_len 保持原始值
+                # real_audio_len remains the original value
                 
         except Exception as e:
             print(f"[Dataset Error] idx={idx}: {e}")
@@ -208,7 +206,7 @@ class CalmTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(
             text_input_ids=inputs["text_input_ids"],
-            audio_features=inputs["audio_features"], # 名字统一
+            audio_features=inputs["audio_features"],
             attention_mask=inputs["attention_mask"],
             audio_lens=inputs["audio_lens"],
             labels=inputs["labels"],
@@ -258,40 +256,36 @@ class CalmTrainer(Trainer):
 
     def create_optimizer(self):
         """
-        覆盖默认优化器，为 Projector 和 Head 设置特定的学习率。
+        Override the default optimizer to set specific learning rates for Projector and Head.
         """
         if self.optimizer is None:
             decay_parameters = []
             no_decay_parameters = []
             
-            # 定义特定组件的参数组
+            # Define parameter groups for specific components
             projector_parameters = []
             
-            # 1. 区分 Projector/Head 和其他参数 (LLM/LoRA)
-            # 注意：model.input_proj 和 model.output_head 是 QwenCALM 的成员
+            # 1. Distinguish Projector/Head and other parameters (LLM/LoRA)
+            # Note: model.input_proj and model.output_head are members of QwenCALM
             head_names = ["input_proj", "output_head"]
             
             for name, param in self.model.named_parameters():
                 if not param.requires_grad:
                     continue
                 
-                # 检查是否属于 Projector 或 Head
+                # Check if belongs to Projector or Head
                 is_head = any(n in name for n in head_names)
                 
                 if is_head:
                     projector_parameters.append(param)
                 else:
-                    # 属于 LLM (LoRA) 的参数
+                    # Belongs to LLM (LoRA) parameters
                     if "bias" in name or "LayerNorm" in name:
                         no_decay_parameters.append(param)
                     else:
                         decay_parameters.append(param)
 
-            # 2. 设置参数组
-            # 假设: 
-            # - args.learning_rate 是给 LoRA 的 (e.g. 2e-4)
-            # - 我们希望 Projector 也是这个速度，或者更大 (e.g. 1e-3)
-            # 这里简单起见，让 Projector 跟随主 LR，或者你可以手动乘个系数
+            # 2. Set parameter groups
             
             optimizer_grouped_parameters = [
                 {
@@ -307,9 +301,7 @@ class CalmTrainer(Trainer):
                 {
                     "params": projector_parameters,
                     "weight_decay": self.args.weight_decay,
-                    "lr": 20 * self.args.learning_rate, # 示例：给 Projector 10倍 LR (如果主 LR 很小)
-                    # 或者直接用 self.args.learning_rate，取决于你设置的基础 LR 是多少
-                    # 只要确保它足够大 (通常 >= 1e-4) 即可
+                    "lr": 20 * self.args.learning_rate,
                 },
             ]
 
@@ -330,7 +322,7 @@ def main():
         print("Warning: Enforcing ddp_find_unused_parameters=True for mixed tasks.")
         training_args.ddp_find_unused_parameters = True
     
-    # 1. Tokenizer (设置 Left Padding)
+    # 1. Tokenizer (Set Left Padding)
     tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eod_id
@@ -368,7 +360,8 @@ def main():
         tokenizer=tokenizer,
         max_text_len=data_args.max_text_len,
         max_audio_len=data_args.max_audio_len,
-        use_latents=model_args.use_precomputed_latents
+        use_latents=model_args.use_precomputed_latents,
+        latent_downsample=data_args.latent_downsample
     )
 
     eval_dir = data_args.eval_mel_dir if data_args.eval_mel_dir else data_args.mel_dir
@@ -379,7 +372,8 @@ def main():
         tokenizer=tokenizer,
         max_text_len=data_args.max_text_len,
         max_audio_len=data_args.max_audio_len,
-        use_latents=model_args.use_precomputed_latents
+        use_latents=model_args.use_precomputed_latents,
+        latent_downsample=data_args.latent_downsample
     )
     
     trainer = CalmTrainer(
