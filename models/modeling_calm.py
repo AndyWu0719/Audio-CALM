@@ -6,53 +6,111 @@ from models.modeling_vae import AcousticVAE
 import os
 import math
 
-class GMMHead(nn.Module):
-    def __init__(self, input_dim, output_dim, num_mixtures=8):
+# =============================================================================
+# Energy-Based Components (Ported from CALM)
+# =============================================================================
+
+class MLPBlock(nn.Module):
+    def __init__(self, channels):
         super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.num_mixtures = num_mixtures
-        
-        self.proj = nn.Linear(input_dim, num_mixtures * (2 * output_dim + 1))
+        self.channels = channels
+        self.in_ln = nn.LayerNorm(channels, eps=1e-6)
+        self.linears = nn.Sequential(
+            nn.Linear(2 * channels, channels, bias=True),
+            nn.SiLU(),
+            nn.Linear(channels, channels, bias=True),
+            nn.SiLU(),
+            nn.Linear(channels, 2 * channels, bias=True)
+        )
+        self.gate_act = nn.SiLU()
+        self.down_proj = nn.Linear(channels, channels, bias=True)
+
+    def forward(self, x, y):
+        # x: noise embedding, y: condition (LLM hidden state)
+        # Concatenate along the last dimension
+        h = self.linears(torch.cat((self.in_ln(x), y), dim=-1))
+        gate_proj, up_proj = torch.chunk(h, 2, dim=-1)
+        gate_proj = self.gate_act(gate_proj)
+        step = self.down_proj(gate_proj * up_proj)
+        return x + step
+
+class FinalLayer(nn.Module):
+    def __init__(self, model_channels, out_channels):
+        super().__init__()
+        self.in_ln = nn.LayerNorm(model_channels, eps=1e-6)
+        self.linears = nn.Sequential(
+            nn.Linear(model_channels, model_channels, bias=True),
+            nn.SiLU(),
+            nn.Linear(model_channels, out_channels, bias=True)
+        )
 
     def forward(self, x):
-        B, S, _ = x.shape
-        params = self.proj(x)
+        return self.linears(self.in_ln(x))
+
+class MLPGenerator(nn.Module):
+    """
+    Energy-based Implicit Generator.
+    """
+    def __init__(self, input_dim, output_dim, noise_size=64, num_mlp_layers=2):
+        super().__init__()
+        self.noise_size = noise_size
+        self.input_dim = input_dim
         
-        pi_logits, split_rem = params.split([self.num_mixtures, 2 * self.num_mixtures * self.output_dim], dim=-1)
-        mu, log_sigma = split_rem.view(B, S, self.num_mixtures, 2, self.output_dim).unbind(dim=3)
+        self.noise_embd = nn.Linear(noise_size, input_dim)
+        self.hidden_embd = nn.Linear(input_dim, input_dim)
+        self.norm_hidden = nn.LayerNorm(input_dim, eps=1e-6)
+        self.norm_noise = nn.LayerNorm(input_dim, eps=1e-6)
+
+        mlp_blocks = []
+        for i in range(num_mlp_layers):
+            mlp_blocks.append(MLPBlock(input_dim))
+        self.mlp_blocks = nn.ModuleList(mlp_blocks)
+        self.final_layer = FinalLayer(input_dim, output_dim) # output_dim 是 VAE latent dim
+
+    def initialize_weights(self):
+        nn.init.constant_(self.final_layer.linears[-1].weight, 0)
+        nn.init.constant_(self.final_layer.linears[-1].bias, 0)
+
+    def sample(self, hidden_states):
+        # hidden_states shape: [Batch, ..., HiddenDim]
+        noise = torch.rand((*hidden_states.shape[:-1], self.noise_size),
+                           dtype=hidden_states.dtype, device=hidden_states.device) - 0.5
         
-        log_sigma = torch.clamp(log_sigma, min=-5.0, max=2.0)
-        
-        return pi_logits, mu, log_sigma
+        noise_embds = self.norm_noise(self.noise_embd(noise))
+        hidden_states_norm = self.norm_hidden(self.hidden_embd(hidden_states))
 
-def masked_gmm_loss(target, pi_logits, mu, log_sigma, mask):
-    target = target.float()          # [B,S,D]
-    pi_logits = pi_logits.float()    # [B,S,K]
-    mu = mu.float()                  # [B,S,K,D]
-    log_sigma = log_sigma.float()    # [B,S,K,D]
-    mask = mask.bool()               # [B,S]
+        for block in self.mlp_blocks:
+            noise_embds = block(noise_embds, hidden_states_norm)
 
-    var = torch.exp(2 * log_sigma)
-    log_prob_comp = -0.5 * ((target.unsqueeze(2) - mu) ** 2 / var) - log_sigma - 0.5 * math.log(2 * math.pi)
-    log_prob_comp = log_prob_comp.sum(dim=-1)              # [B,S,K]
+        latent_prediction = self.final_layer(noise_embds)
+        return latent_prediction
 
-    log_pi = F.log_softmax(pi_logits, dim=-1)
-    log_likelihood = torch.logsumexp(log_pi + log_prob_comp, dim=-1)  # [B,S]
-
-    log_likelihood = log_likelihood * mask
-    denom = mask.sum().clamp(min=1)
-    return -(log_likelihood.sum() / denom)
+# =============================================================================
+# Qwen-CALM Model Definition
+# =============================================================================
 
 class QwenCALMConfig(PretrainedConfig):
     model_type = "qwen_calm"
-    def __init__(self, qwen_path=None, vae_path=None, num_mixtures=8, use_precomputed_latents=False, latent_dim=64, **kwargs):
+    def __init__(self, 
+                 qwen_path=None, 
+                 vae_path=None, 
+                 use_precomputed_latents=False, 
+                 latent_dim=64,
+                 # Energy-specific configs
+                 noise_size=64,
+                 num_mlp_layers=2,
+                 num_samples=8,      # Number of samples to draw during training
+                 beta=0.25,          # Energy distance exponent
+                 **kwargs):
         super().__init__(**kwargs)
         self.qwen_path = qwen_path
         self.vae_path = vae_path
-        self.num_mixtures = num_mixtures
         self.use_precomputed_latents = use_precomputed_latents
         self.latent_dim = latent_dim
+        self.noise_size = noise_size
+        self.num_mlp_layers = num_mlp_layers
+        self.num_samples = num_samples
+        self.beta = beta
 
 class QwenCALM(PreTrainedModel):
     config_class = QwenCALMConfig
@@ -86,7 +144,19 @@ class QwenCALM(PreTrainedModel):
 
         qwen_dim = self.llm.config.hidden_size
         self.input_proj = nn.Linear(vae_latent_dim, qwen_dim)
-        self.output_head = GMMHead(qwen_dim, vae_latent_dim, num_mixtures=config.num_mixtures)
+        
+        # [CHANGE] Replace GMMHead with MLPGenerator
+        self.output_head = MLPGenerator(
+            input_dim=qwen_dim, 
+            output_dim=vae_latent_dim,
+            noise_size=config.noise_size,
+            num_mlp_layers=config.num_mlp_layers
+        )
+        self.output_head.initialize_weights()
+
+        # Energy Loss parameters
+        self.num_samples = config.num_samples
+        self.beta = config.beta
         
         nn.init.normal_(self.input_proj.weight, std=0.02)
 
@@ -99,32 +169,69 @@ class QwenCALM(PreTrainedModel):
     def gradient_checkpointing_disable(self):
         self.llm.gradient_checkpointing_disable()
 
+    # --- Energy Score Calculation ---
+    def distance(self, x_1, x_2):
+        return torch.pow(torch.linalg.norm(x_1 - x_2, ord=2, dim=-1), self.beta)
+    
+    def energy_score(self, x, mean, log_std):
+        """
+        x: Predicted samples [num_samples, batch_size, dim]
+        mean, log_std: Parameters of the target distribution
+        """
+        n_x = x.shape[0]
+        # Energy Distance Term 1: E[||x - x'||] (Diversity of generated samples)
+        x_i = x.unsqueeze(1)  
+        x_j = x.unsqueeze(0)  
+        distance_matrix = self.distance(x_i, x_j)
+        distance_x = distance_matrix.sum(dim=(0,1)) / (n_x * (n_x - 1))
+
+        # Sampling from Target Distribution (Posterior q(z|x))
+        std = torch.exp(log_std)
+        n_y = 100 # Sample 100 points from the true posterior to approximate the integral
+        eps = torch.randn((n_y, *mean.shape), device=mean.device)
+        y = mean.unsqueeze(0) + eps * std.unsqueeze(0)  # [n_y, batch_size, dim]
+
+        # Energy Distance Term 2: E[||x - y||] (Match generation to target)
+        x_ = x.unsqueeze(1)       # [n_x, 1, batch, dim]
+        y_ = y.unsqueeze(0)       # [1, n_y, batch, dim]
+        distance_y = self.distance(x_, y_).mean(dim=(0, 1))
+        
+        # Score = 2 * E[||x-y||] - E[||x-x'||] - E[||y-y'||]
+        # Since we maximize score (minimize -score), and E[||y-y'||] is constant w.r.t model, we ignore it.
+        # Loss = - (2 * Distance_XY - Distance_XX)
+        # However, CALM implementation uses: distance_x - 2 * distance_y
+        score = distance_x - distance_y * 2
+        return score
+
     def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None):
-        """
-        text_input_ids: [B, T_text] (Left padded)
-        audio_features: [B, D, T] (Mel or Latent)
-        attention_mask: [B, T_text] (Text Mask)
-        audio_lens: [B] (True lengths of audio features before padding)
-        """
         batch_size = text_input_ids.shape[0]
         device = text_input_ids.device
         
         if task_modes is None:
             task_modes = ["tts"] * batch_size
 
-        # 1. Latents
+        # 1. Latents Preparation
         with torch.no_grad():
             if self.use_precomputed_latents:
-                # audio_features: latents [B, 64, T] -> [B, T, 64]
-                # dataset: [64, T] -> collator: [B, 64, T]
                 gt_latents = audio_features.transpose(1, 2)
+                # Fallback if precomputed latents don't have variance info
+                gt_mean = gt_latents
+                gt_log_std = torch.zeros_like(gt_mean) - 5.0 
             else:
-                # audio_features: Mel [B, 80, T]
-                mu, _ = self.vae.encode(audio_features) 
-                gt_latents = mu.transpose(1, 2)
+                # [Important] Ensure VAE returns (mu, log_var)
+                # If your VAE only returns one value, check modeling_vae.py
+                vae_out = self.vae.encode(audio_features)
+                if isinstance(vae_out, tuple):
+                    mu, log_var = vae_out
+                else:
+                    mu = vae_out
+                    log_var = torch.zeros_like(mu) - 5.0 # Fallback
+                
+                gt_mean = mu.transpose(1, 2)
+                gt_log_std = log_var.transpose(1, 2) * 0.5
 
         # 2. Audio Mask
-        B_aud, T_aud, _ = gt_latents.shape
+        B_aud, T_aud, _ = gt_mean.shape
         if audio_lens is not None:
             if self.use_precomputed_latents:
                 latent_lens = audio_lens
@@ -136,15 +243,14 @@ class QwenCALM(PreTrainedModel):
                     rounding_mode='floor'
                 )
             
-            # Mask: [B, T_aud] (1 for valid, 0 for pad)
             audio_mask = torch.arange(T_aud, device=device)[None, :] < latent_lens[:, None]
             audio_mask = audio_mask.to(dtype=torch.long)
         else:
             audio_mask = torch.ones((B_aud, T_aud), device=device, dtype=torch.long)
 
         # 3. Project to LLM dimension
-        audio_embeds = self.input_proj(gt_latents) # [B, T_aud, 4096]
-        text_embeds = self.llm.transformer.wte(text_input_ids) # [B, T_text, 4096]
+        audio_embeds = self.input_proj(gt_mean) 
+        text_embeds = self.llm.transformer.wte(text_input_ids) 
         
         if attention_mask is None:
             attention_mask = torch.ones((batch_size, text_input_ids.shape[1]), device=device, dtype=torch.long)
@@ -163,26 +269,16 @@ class QwenCALM(PreTrainedModel):
             
             sub_text = text_embeds[idx]       
             sub_audio = audio_embeds[idx]     
-            sub_gt = gt_latents[idx]
-            
             sub_text_mask = attention_mask[idx]
             sub_audio_mask = audio_mask[idx]
             
-            # Input: Text + Audio_Prefix
-            # Text: Left Padded: [Pad, Text]
-            # Audio: Right Padded: [Audio, Pad]
-            # [Pad, Text, Audio, Pad] (No last Pad)
-            
-            # Input frame: Audio 0, ..., Audio T-2
+            # Input construction: [Pad, Text, Audio_Prefix]
             inp = torch.cat([sub_text, sub_audio[:, :-1, :]], dim=1)
-            
-            # Splicing Mask
             full_mask = torch.cat([sub_text_mask, sub_audio_mask[:, :-1]], dim=1)
             
             position_ids = full_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(full_mask == 0, 1)
             
-            # Pass in position_ids
             out = self.llm(
                 inputs_embeds=inp, 
                 attention_mask=full_mask, 
@@ -191,19 +287,37 @@ class QwenCALM(PreTrainedModel):
             )
             last_hidden = out.hidden_states[-1]
             
+            # Extract Audio Part Hidden States
             txt_len = sub_text.shape[1]
             audio_hidden = last_hidden[:, txt_len-1:, :] 
             
-            pi, mu, log_sigma = self.output_head(audio_hidden)
+            # Prepare Ground Truth
+            sub_gt_mean = gt_mean[idx]
+            sub_gt_log_std = gt_log_std[idx]
             
-            # Calculate Loss (simple average, ignoring Mask == 0 parts)
-            tts_mask = sub_audio_mask[:, :sub_gt.size(1)].bool()  # [B, T_aud]
-            tts_step_loss = masked_gmm_loss(sub_gt, pi, mu, log_sigma, tts_mask)
+            # --- Energy Loss Calculation (Optimized with Masking) ---
+            # Instead of masking the loss, we select valid tokens first
+            tts_mask = sub_audio_mask[:, :sub_gt_mean.size(1)].bool()
             
-            total_loss += tts_step_loss
-            valid_samples += 1
-            accum_tts_loss += tts_step_loss
-            tts_count += 1
+            # Flatten: Select only valid frames across the batch
+            valid_hidden = audio_hidden[tts_mask]       # [N_total_frames, 4096]
+            valid_gt_mean = sub_gt_mean[tts_mask]       # [N_total_frames, 64]
+            valid_gt_log_std = sub_gt_log_std[tts_mask] # [N_total_frames, 64]
+            
+            if valid_hidden.shape[0] > 0:
+                # Repeat hidden states for multiple samples [num_samples, N_frames, dim]
+                hidden_repeated = valid_hidden.unsqueeze(0).repeat(self.num_samples, 1, 1)
+                
+                # Generate predictions
+                latent_pred = self.output_head.sample(hidden_repeated)
+                
+                # Calculate Energy Score (we minimize NEGATIVE score)
+                tts_step_loss = -self.energy_score(latent_pred, valid_gt_mean, valid_gt_log_std)
+                
+                total_loss += tts_step_loss
+                accum_tts_loss += tts_step_loss
+                tts_count += 1
+                valid_samples += 1
 
         # === ASR (Audio -> Text) ===
         asr_indices = [i for i, m in enumerate(task_modes) if m == "asr"]
@@ -213,18 +327,12 @@ class QwenCALM(PreTrainedModel):
             sub_audio = audio_embeds[idx]
             sub_text = text_embeds[idx]
             sub_labels = labels[idx]
-            
             sub_audio_mask = audio_mask[idx]
             sub_text_mask = attention_mask[idx]
             
-            # Input: [Audio, Text]
             inp = torch.cat([sub_audio, sub_text], dim=1)
-            
-            # Full Mask: [Audio_Mask, Text_Mask]
-            # Audio Mask will mask Audio Padding
             full_mask = torch.cat([sub_audio_mask, sub_text_mask], dim=1)
             
-            # Labels
             B_sub, T_aud, _ = sub_audio.shape
             prefix_labels = torch.full((B_sub, T_aud), -100, dtype=torch.long, device=device)
             full_labels = torch.cat([prefix_labels, sub_labels], dim=1)
@@ -232,7 +340,6 @@ class QwenCALM(PreTrainedModel):
             position_ids = full_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(full_mask == 0, 1)
             
-            # Pass in position_ids
             out = self.llm(
                 inputs_embeds=inp, 
                 attention_mask=full_mask, 
@@ -241,7 +348,6 @@ class QwenCALM(PreTrainedModel):
             )
             
             logits = self.llm.lm_head(out.hidden_states[-1])
-            
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = full_labels[..., 1:].contiguous()
             
@@ -253,25 +359,26 @@ class QwenCALM(PreTrainedModel):
             
             total_loss += loss_asr
             valid_samples += 1
-
             accum_asr_loss += loss_asr
             asr_count += 1
 
+        # Handling dummy loss for DDP to avoid unused parameter errors
         if len(tts_indices) == 0:
-            dummy_hidden = audio_embeds[:, :1, :].mean() # Scalar
+            dummy_hidden = audio_embeds[:, :1, :].mean() 
             dummy_in = torch.zeros((1, 1, 4096), device=device, dtype=audio_embeds.dtype)
-            dummy_in = audio_embeds[:, :1, :] * 0 
-            
-            pi, mu, log_sigma = self.output_head(dummy_in)
-            total_loss += (pi.sum() + mu.sum() + log_sigma.sum()) * 0.0
+            dummy_pred = self.output_head.sample(dummy_in)
+            total_loss += (dummy_pred.sum() * 0.0) + (dummy_hidden * 0.0)
 
         if len(asr_indices) == 0 and self.llm.lm_head.weight.requires_grad:
              dummy_in = text_embeds[:, :1, :] * 0
              dummy_logits = self.llm.lm_head(dummy_in)
              total_loss += dummy_logits.sum() * 0.0
 
-
-        if valid_samples > 0:
+        if valid_samples > 1: # Already summed, just normalization if needed? 
+            # In mixed training, usually we average over tasks or just sum. 
+            # Here keeping simple sum / count logic.
+            # If tts_count=1 and asr_count=1, total_loss has sum. 
+            # Let's just divide by valid_samples to denote "loss per task batch"
             total_loss = total_loss / valid_samples
             
         avg_tts = accum_tts_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
@@ -290,12 +397,13 @@ class QwenCALM(PreTrainedModel):
         
         state_dict = kwargs.get("state_dict", None)
         
-        if state_dict is None:
-            input_proj_state = self.input_proj.state_dict()
-            output_head_state = self.output_head.state_dict()
-        else:
-            input_proj_state = {k.replace("input_proj.", ""): v for k, v in state_dict.items() if k.startswith("input_proj.")}
-            output_head_state = {k.replace("output_head.", ""): v for k, v in state_dict.items() if k.startswith("output_head.")}
-            
-        torch.save(input_proj_state, os.path.join(save_directory, "input_proj.bin"))
-        torch.save(output_head_state, os.path.join(save_directory, "output_head.bin"))
+        # Helper to save specific modules
+        def save_module(module, name, state_dict=None):
+            if state_dict is None:
+                sd = module.state_dict()
+            else:
+                sd = {k.replace(f"{name}.", ""): v for k, v in state_dict.items() if k.startswith(f"{name}.")}
+            torch.save(sd, os.path.join(save_directory, f"{name}.bin"))
+
+        save_module(self.input_proj, "input_proj", state_dict)
+        save_module(self.output_head, "output_head", state_dict)

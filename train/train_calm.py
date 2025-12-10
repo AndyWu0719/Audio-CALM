@@ -28,8 +28,11 @@ class ModelArguments:
     lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
     use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk to speed up training."})
-    num_mixtures: int = 8
     latent_dim: int = 64
+    noise_size: int = field(default=64, metadata={"help": "Dimension of the noise vector for Energy Head"})
+    num_mlp_layers: int = field(default=2, metadata={"help": "Number of layers in the MLP Generator"})
+    num_samples: int = field(default=8, metadata={"help": "Number of samples for Energy Loss calculation"})
+    beta: float = field(default=0.25, metadata={"help": "Beta parameter for Energy distance"})
 
 @dataclass
 class DataArguments:
@@ -337,7 +340,11 @@ def main():
         vae_path=model_args.vae_path,
         num_mixtures=model_args.num_mixtures,
         use_precomputed_latents=model_args.use_precomputed_latents,
-        latent_dim=model_args.latent_dim
+        latent_dim=model_args.latent_dim,
+        noise_size=model_args.noise_size,
+        num_mlp_layers=model_args.num_mlp_layers,
+        num_samples=model_args.num_samples,
+        beta=model_args.beta
     )
     
     model = QwenCALM(calm_config)

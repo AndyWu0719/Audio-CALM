@@ -19,13 +19,16 @@ PER_DEVICE_BATCH_SIZE=2
 GRAD_ACCUM=16
 
 LATENT_DOWN=16
-NUM_MIX=8
 LATENT_DIM=64
 LR=5e-5
+NOISE_SIZE=64
+MLP_LAYERS=2
+NUM_SAMPLES=8   # 显存允许的话，越大越好 (8-16)
+BETA=0.25
 LR_TAG=${LR//./p}   # 5e-5 -> 5e-5 或 5p00000e-05，根据需要可自定义
-RUN_NAME="${LATENT_DOWN}-${NUM_MIX}-${LATENT_DIM}-${LR_TAG}"
+RUN_NAME="Energy-MLP${MLP_LAYERS}-N${NUM_SAMPLES}-LR${LR_TAG}"
 
-OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_v1"
+OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_energy"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/${RUN_NAME}"
 
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
@@ -38,7 +41,10 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --output_dir "$OUTPUT_DIR" \
     --report_to "tensorboard" \
     \
-    --num_mixtures $NUM_MIX \
+    --label_names "labels" \
+    --noise_size $NOISE_SIZE \
+    --num_mlp_layers $MLP_LAYERS \
+    --num_samples $NUM_SAMPLES \
     --latent_dim $LATENT_DIM \
     --latent_downsample 16 \
     \
