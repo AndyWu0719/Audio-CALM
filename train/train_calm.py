@@ -24,8 +24,8 @@ class ModelArguments:
     qwen_path: str = field(metadata={"help": "Path to Qwen-Audio pretrained folder"})
     vae_path: str = field(metadata={"help": "Path to trained VAE checkpoint folder"})
     use_lora: bool = field(default=True, metadata={"help": "Whether to use LoRA"})
-    lora_rank: int = field(default=64, metadata={"help": "LoRA Rank"})
-    lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
+    lora_rank: int = field(default=16, metadata={"help": "LoRA Rank"})
+    lora_alpha: int = field(default=32, metadata={"help": "LoRA Alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
     use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk to speed up training."})
     latent_dim: int = 64
