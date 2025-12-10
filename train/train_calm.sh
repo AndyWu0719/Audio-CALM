@@ -20,6 +20,9 @@ PER_DEVICE_BATCH_SIZE=2
 GRAD_ACCUM=16
 LR=5e-5                  # Projector: 1e-3
 
+NUM_MIX=8
+LATENT_DIM=64
+
 echo "=== Starting CALM Joint Training (Latent Mode) ==="
 echo "Train Data Dir: $TRAIN_DATA_DIR"
 echo "Eval Data Dir: $EVAL_DATA_DIR"
@@ -28,6 +31,10 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --do_train \
     --run_name "calm-latent-v1" \
     --report_to "tensorboard" \
+    \
+    --num_mixtures $NUM_MIX \
+    --latent_dim $LATENT_DIM \
+    --latent_downsample 16 \
     \
     --qwen_path "$QWEN_PATH" \
     --vae_path "$VAE_PATH" \
@@ -40,7 +47,6 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --eval_subsets "dev-clean" \
     --max_text_len 256 \
     --max_audio_len 2048 \
-    --latent_downsample 16 \
     \
     --per_device_train_batch_size $PER_DEVICE_BATCH_SIZE \
     --per_device_eval_batch_size 1 \

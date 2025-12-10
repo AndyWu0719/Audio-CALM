@@ -28,6 +28,8 @@ class ModelArguments:
     lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
     use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk to speed up training."})
+    num_mixtures: int = 8
+    latent_dim: int = 64
 
 @dataclass
 class DataArguments:
@@ -333,8 +335,9 @@ def main():
     calm_config = QwenCALMConfig(
         qwen_path=model_args.qwen_path,
         vae_path=model_args.vae_path,
-        num_mixtures=8,
-        use_precomputed_latents=model_args.use_precomputed_latents # Pass to config
+        num_mixtures=model_args.num_mixtures,
+        use_precomputed_latents=model_args.use_precomputed_latents,
+        latent_dim=model_args.latent_dim
     )
     
     model = QwenCALM(calm_config)

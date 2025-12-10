@@ -46,12 +46,13 @@ def masked_gmm_loss(target, pi_logits, mu, log_sigma, mask):
 
 class QwenCALMConfig(PretrainedConfig):
     model_type = "qwen_calm"
-    def __init__(self, qwen_path=None, vae_path=None, num_mixtures=8, use_precomputed_latents=False, **kwargs):
+    def __init__(self, qwen_path=None, vae_path=None, num_mixtures=8, use_precomputed_latents=False, latent_dim=64, **kwargs):
         super().__init__(**kwargs)
         self.qwen_path = qwen_path
         self.vae_path = vae_path
         self.num_mixtures = num_mixtures
         self.use_precomputed_latents = use_precomputed_latents
+        self.latent_dim = latent_dim
 
 class QwenCALM(PreTrainedModel):
     config_class = QwenCALMConfig
@@ -81,9 +82,9 @@ class QwenCALM(PreTrainedModel):
             vae_latent_dim = self.vae.config.latent_channels
         else:
             print("Skipping VAE loading (Using precomputed latents).")
-        
+            vae_latent_dim = config.latent_dim
+
         qwen_dim = self.llm.config.hidden_size
-        
         self.input_proj = nn.Linear(vae_latent_dim, qwen_dim)
         self.output_head = GMMHead(qwen_dim, vae_latent_dim, num_mixtures=config.num_mixtures)
         
