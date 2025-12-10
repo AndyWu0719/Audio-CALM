@@ -81,10 +81,10 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     \
     --logging_steps 10 \
     --save_strategy "steps" \
-    --save_steps 1 \
+    --save_steps 500 \
     --save_total_limit 2 \
     --evaluation_strategy "steps" \
-    --eval_steps 1 \
+    --eval_steps 500 \
     --load_best_model_at_end True \
     --metric_for_best_model "eval_loss" \
     --greater_is_better False
