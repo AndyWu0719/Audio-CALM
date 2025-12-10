@@ -270,7 +270,7 @@ class CalmTrainer(Trainer):
                 {
                     "params": projector_parameters,
                     "weight_decay": self.args.weight_decay,
-                    "lr": 1e-3, # 示例：给 Projector 10倍 LR (如果主 LR 很小)
+                    "lr": 20 * self.args.learning_rate, # 示例：给 Projector 10倍 LR (如果主 LR 很小)
                     # 或者直接用 self.args.learning_rate，取决于你设置的基础 LR 是多少
                     # 只要确保它足够大 (通常 >= 1e-4) 即可
                 },
