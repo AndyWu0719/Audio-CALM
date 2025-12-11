@@ -12,11 +12,14 @@ VAE_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_4x/checkpoint-54000"
 
 TRAIN_DATA_DIR="${WORK_PATH}/data/latents/train"
 EVAL_DATA_DIR="${WORK_PATH}/data/latents/dev"
-
 LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeech/LibriSpeech"
 
-PER_DEVICE_BATCH_SIZE=1
-GRAD_ACCUM=16
+# 4-bit 模式下显存充足，单卡 Batch Size 设为 4，总 Batch Size 64
+PER_DEVICE_BATCH_SIZE=2
+GRAD_ACCUM=8 
+
+# 开启 4-bit 量化
+USE_QLORA=True
 
 LATENT_DOWN=4
 LATENT_DIM=64
@@ -27,8 +30,8 @@ BETA=0.25
 TEMPERATURE=1.0
 LR=5e-5
 LR_TAG=${LR//./p}
-RUN_NAME="${LATENT_DOWN}-${NUM_SAMPLES}-${LATENT_DIM}-${LR_TAG}"
 
+RUN_NAME="qlora-${LATENT_DOWN}-${NUM_SAMPLES}-${LATENT_DIM}-${LR_TAG}"
 OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_energy"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/${RUN_NAME}"
 
@@ -37,8 +40,8 @@ echo "Train Data Dir: $TRAIN_DATA_DIR"
 echo "Eval Data Dir: $EVAL_DATA_DIR"
 
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
-    --deepspeed ds_config.json \
     --do_train \
+    --do_eval \
     --run_name "$RUN_NAME" \
     --output_dir "$OUTPUT_DIR" \
     --report_to "tensorboard" \
@@ -68,9 +71,10 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps $GRAD_ACCUM \
     --num_train_epochs 3 \
-    --optim "adamw_torch_fused" \
+    --optim "adamw_torch" \
     \
     --use_lora True \
+    --use_qlora $USE_QLORA \
     --use_precomputed_latents True \
     --bf16 True \
     --gradient_checkpointing True \

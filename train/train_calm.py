@@ -6,14 +6,22 @@ from dataclasses import dataclass, field
 import torch.distributed as dist
 from typing import List, Dict
 from glob import glob
+import math
 
 sys.path.append(os.getcwd())
 
 from torch.utils.data import Dataset
-from transformers import Trainer, TrainingArguments, HfArgumentParser, set_seed, AutoTokenizer
+from transformers import (
+    Trainer, 
+    TrainingArguments, 
+    HfArgumentParser, 
+    set_seed, 
+    AutoTokenizer, 
+    BitsAndBytesConfig
+)
 from torch.optim import AdamW
 from models.modeling_calm import QwenCALM, QwenCALMConfig
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -26,10 +34,11 @@ class ModelArguments:
     qwen_path: str = field(metadata={"help": "Path to Qwen-Audio pretrained folder"})
     vae_path: str = field(metadata={"help": "Path to trained VAE checkpoint folder"})
     use_lora: bool = field(default=True, metadata={"help": "Whether to use LoRA"})
+    use_qlora: bool = field(default=True, metadata={"help": "Enable 4-bit QLoRA to save VRAM"})
     lora_rank: int = field(default=64, metadata={"help": "LoRA Rank"})
     lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
-    use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk to speed up training."})
+    use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk."})
     latent_dim: int = 64
     noise_size: int = field(default=64, metadata={"help": "Dimension of the noise vector for Energy Head"})
     num_mlp_layers: int = field(default=2, metadata={"help": "Number of layers in the MLP Generator"})
@@ -62,14 +71,10 @@ class CalmDataset(Dataset):
         subset_list = subsets.split(",")
         print(f"Scanning pairs in {subset_list}...")
         
-        # 1. Build file index
         file_index = {}
         for subset in subset_list:
             subset_dir = os.path.join(data_dir, subset.strip())
-            if not os.path.exists(subset_dir): 
-                print(f"Warning: Directory not found: {subset_dir}")
-                continue
-            
+            if not os.path.exists(subset_dir): continue
             files = glob(os.path.join(subset_dir, "*.pt"))
             for f in files:
                 key = os.path.splitext(os.path.basename(f))[0]
@@ -77,11 +82,9 @@ class CalmDataset(Dataset):
         
         print(f"Indexed {len(file_index)} audio files.")
         
-        # 2. Scan text
         for subset in subset_list:
             subset_dir = os.path.join(librispeech_root, subset.strip())
             if not os.path.exists(subset_dir): continue
-            
             for root, dirs, files in os.walk(subset_dir):
                 for file in files:
                     if file.endswith(".trans.txt"):
@@ -91,24 +94,18 @@ class CalmDataset(Dataset):
                                     parts = line.strip().split(" ", 1)
                                     if len(parts) != 2: continue
                                     file_id, text = parts
-                                    
                                     if file_id in file_index:
-                                        self.data.append({
-                                            "text": text,
-                                            "file_path": file_index[file_id]
-                                        })
+                                        self.data.append({"text": text, "file_path": file_index[file_id]})
                         except Exception as e:
                             pass
         print(f"Total matched pairs: {len(self.data)}")
         
-        # 3. RAM Cache Preloading
         print("Pre-loading all latents into RAM (approx 3-4GB)...")
         self.cached_latents = {}
-        
         def load_file(idx_item_tuple):
             i, item = idx_item_tuple
             try:
-                # Load to CPU, float16 to save RAM
+                # 转换 float16 节省内存
                 tensor = torch.load(item['file_path'], map_location="cpu").to(torch.float16)
                 return item['file_path'], tensor
             except Exception as e:
@@ -118,8 +115,7 @@ class CalmDataset(Dataset):
             futures = [executor.submit(load_file, (i, item)) for i, item in enumerate(self.data)]
             for future in tqdm(as_completed(futures), total=len(self.data), desc="Loading Latents"):
                 path, tensor = future.result()
-                if path is not None:
-                    self.cached_latents[path] = tensor
+                if path is not None: self.cached_latents[path] = tensor
         print(f"Cached {len(self.cached_latents)} latent files.")
 
     def __len__(self):
@@ -128,7 +124,7 @@ class CalmDataset(Dataset):
     def __getitem__(self, idx):
         text_ids = [self.pad_id]
         labels = [-100]
-        audio = torch.zeros(64 if self.use_latents else 80, 10)
+        audio = torch.zeros(64, 10)
         task_mode = "tts" 
         real_audio_len = 10
 
@@ -156,19 +152,13 @@ class CalmDataset(Dataset):
                 text_ids = text_ids[:self.max_text_len]
                 labels = labels[:self.max_text_len]
 
-            # === [FIXED] Audio Loading (Check Cache First) ===
             path = item['file_path']
             if path in self.cached_latents:
-                audio = self.cached_latents[path].float() # Convert back to float32
+                audio = self.cached_latents[path].float() 
             else:
                 audio = torch.load(path, map_location="cpu")
             
-            # Calculate Target Length
-            if self.use_latents:
-                TARGET_LEN = self.max_audio_len // self.latent_downsample
-            else:
-                TARGET_LEN = self.max_audio_len
-
+            TARGET_LEN = self.max_audio_len 
             real_audio_len = audio.shape[1]
             
             if audio.shape[1] > TARGET_LEN:
@@ -192,8 +182,7 @@ class CalmDataset(Dataset):
 
 def data_collator(features, pad_id):
     valid_features = [f for f in features if f["audio_features"].shape[1] > 0]
-    if not valid_features:
-        return {}
+    if not valid_features: return {}
 
     text_ids = [f["text_ids"] for f in valid_features]
     labels = [f["labels"] for f in valid_features]
@@ -230,14 +219,12 @@ def data_collator(features, pad_id):
 class CalmTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Initialize accumulators
         self.meter_tts_loss = 0.0
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
         self.meter_asr_count = 0
         self.meter_div_loss = 0.0
         self.meter_fid_loss = 0.0
-        
         self.eval_meters = {}
         
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -253,19 +240,12 @@ class CalmTrainer(Trainer):
             labels=inputs["labels"],
             task_modes=inputs["task_modes"]
         )
-        
-        # Access attributes safely from CalmModelOutput
         loss = outputs.loss
         
-        # === [FIXED] Accumulate metrics here, DO NOT call self.log() directly ===
         if self.model.training:
-            # We access the raw tensors. For proper DDP average, the custom log() below handles reduce.
-            # Here we just accumulate local sums.
             task_modes = inputs.get("task_modes", [])
             num_tts = task_modes.count("tts")
             num_asr = task_modes.count("asr")
-            
-            # Using getattr to be safe
             loss_tts = getattr(outputs, "loss_tts", torch.tensor(0.0)).item()
             loss_asr = getattr(outputs, "loss_asr", torch.tensor(0.0)).item()
             loss_div = getattr(outputs, "loss_diversity", torch.tensor(0.0)).item()
@@ -278,11 +258,9 @@ class CalmTrainer(Trainer):
             self.meter_div_loss += loss_div * num_tts
             self.meter_fid_loss += loss_fid * num_tts
         else:
-            # Evaluation accumulation
             task_modes = inputs.get("task_modes", [])
             num_tts = task_modes.count("tts")
             num_asr = task_modes.count("asr")
-            
             loss_tts = getattr(outputs, "loss_tts", torch.tensor(0.0)).item()
             loss_asr = getattr(outputs, "loss_asr", torch.tensor(0.0)).item()
             loss_div = getattr(outputs, "loss_diversity", torch.tensor(0.0)).item()
@@ -294,7 +272,6 @@ class CalmTrainer(Trainer):
                     "eval_asr_loss": 0.0, "eval_asr_count": 0,
                     "eval_div_loss": 0.0, "eval_fid_loss": 0.0
                 }
-            
             self.eval_meters["eval_tts_loss"] += loss_tts * num_tts
             self.eval_meters["eval_tts_count"] += num_tts
             self.eval_meters["eval_asr_loss"] += loss_asr * num_asr
@@ -322,16 +299,13 @@ class CalmTrainer(Trainer):
         return output
     
     def log(self, logs: Dict[str, float]) -> None:
-        # Calculate averages from accumulators
         if self.args.world_size > 1:
             metrics = torch.tensor([
                 self.meter_tts_loss, float(self.meter_tts_count),
                 self.meter_asr_loss, float(self.meter_asr_count),
                 self.meter_div_loss, self.meter_fid_loss
             ], device=self.args.device)
-            
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-            
             tts_sum, tts_cnt = metrics[0].item(), metrics[1].item()
             asr_sum, asr_cnt = metrics[2].item(), metrics[3].item()
             div_sum, fid_sum = metrics[4].item(), metrics[5].item()
@@ -345,7 +319,6 @@ class CalmTrainer(Trainer):
         logs["diversity_loss"] = round(div_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         logs["fidelity_loss"] = round(fid_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         
-        # Reset accumulators after logging
         self.meter_tts_loss = 0.0
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
@@ -364,7 +337,6 @@ class CalmTrainer(Trainer):
             
             for name, param in self.model.named_parameters():
                 if not param.requires_grad: continue
-                
                 is_head = any(n in name for n in head_names)
                 if is_head:
                     projector_parameters.append(param)
@@ -395,13 +367,11 @@ def main():
     if not training_args.ddp_find_unused_parameters:
         training_args.ddp_find_unused_parameters = True
     
-    # 1. Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eod_id
     tokenizer.padding_side = 'left' 
 
-    # 2. Config & Model
     calm_config = QwenCALMConfig(
         qwen_path=model_args.qwen_path,
         vae_path=model_args.vae_path,
@@ -414,9 +384,27 @@ def main():
         temperature=model_args.temperature
     )
     
-    model = QwenCALM(calm_config)
+    # [QLoRA Config]
+    bnb_config = None
+    if model_args.use_qlora:
+        print("💡 Enabling 4-bit QLoRA Quantization...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+
+    # Initialize Model with Quantization Config
+    model = QwenCALM(calm_config, quantization_config=bnb_config)
     
-    # 3. LoRA
+    # [Prepare for QLoRA]
+    if model_args.use_qlora:
+        print("🔧 Preparing model for k-bit training...")
+        # [重点] 显式设置为 False，避免初始化死锁，Trainer 会在之后自动正确开启它
+        model.llm = prepare_model_for_kbit_training(model.llm, use_gradient_checkpointing=False)
+
+    # Apply LoRA
     if model_args.use_lora:
         lora_config = LoraConfig(
             r=model_args.lora_rank,
@@ -429,7 +417,6 @@ def main():
         model.llm = get_peft_model(model.llm, lora_config)
         model.llm.print_trainable_parameters()
     
-    # 4. Datasets
     train_dataset = CalmDataset(
         data_dir=data_args.mel_dir, 
         librispeech_root=data_args.librispeech_root,

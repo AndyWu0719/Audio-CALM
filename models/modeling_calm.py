@@ -1,16 +1,21 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, PreTrainedModel, PretrainedConfig, AutoConfig, AutoModel
+from transformers import (
+    AutoModelForCausalLM, 
+    PreTrainedModel, 
+    PretrainedConfig, 
+    AutoConfig, 
+    AutoModel
+)
+from dataclasses import dataclass
+from typing import Optional
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from models.modeling_vae import AcousticVAE
 import os
-import math
-from dataclasses import dataclass
-from typing import Optional, Tuple
+import gc # 引入垃圾回收
 
 # =============================================================================
-# 0. Custom Output Class (New Standard HF Output)
+# 0. Custom Output Class
 # =============================================================================
 
 @dataclass
@@ -25,7 +30,7 @@ class CalmModelOutput(CausalLMOutputWithPast):
     loss_fidelity: Optional[torch.FloatTensor] = None
 
 # =============================================================================
-# Energy-Based Components (Ported from CALM)
+# Energy-Based Components
 # =============================================================================
 
 class MLPBlock(nn.Module):
@@ -44,8 +49,6 @@ class MLPBlock(nn.Module):
         self.down_proj = nn.Linear(channels, channels, bias=True)
 
     def forward(self, x, y):
-        # x: noise embedding, y: condition (LLM hidden state)
-        # Concatenate along the last dimension
         h = self.linears(torch.cat((self.in_ln(x), y), dim=-1))
         gate_proj, up_proj = torch.chunk(h, 2, dim=-1)
         gate_proj = self.gate_act(gate_proj)
@@ -66,9 +69,6 @@ class FinalLayer(nn.Module):
         return self.linears(self.in_ln(x))
 
 class MLPGenerator(nn.Module):
-    """
-    Energy-based Implicit Generator.
-    """
     def __init__(self, input_dim, output_dim, noise_size=64, num_mlp_layers=2):
         super().__init__()
         self.noise_size = noise_size
@@ -83,14 +83,13 @@ class MLPGenerator(nn.Module):
         for i in range(num_mlp_layers):
             mlp_blocks.append(MLPBlock(input_dim))
         self.mlp_blocks = nn.ModuleList(mlp_blocks)
-        self.final_layer = FinalLayer(input_dim, output_dim) # output_dim 是 VAE latent dim
+        self.final_layer = FinalLayer(input_dim, output_dim)
 
     def initialize_weights(self):
         nn.init.constant_(self.final_layer.linears[-1].weight, 0)
         nn.init.constant_(self.final_layer.linears[-1].bias, 0)
 
     def sample(self, hidden_states, temperature=1.0):
-        # hidden_states shape: [Batch, ..., HiddenDim]
         noise = (torch.rand((*hidden_states.shape[:-1], self.noise_size),
                            dtype=hidden_states.dtype, device=hidden_states.device) - 0.5) * temperature
         
@@ -135,18 +134,50 @@ class QwenCALM(PreTrainedModel):
     config_class = QwenCALMConfig
     _supports_gradient_checkpointing = True
 
-    def __init__(self, config):
+    def __init__(self, config, quantization_config=None):
         super().__init__(config)
         
-        print(f"Loading LLM from {config.qwen_path}...")
+        print(f"Loading Qwen-Audio from {config.qwen_path}...")
+        
+        if quantization_config is not None:
+            print("🚀 Loading with 4-bit Quantization (QLoRA)...")
+
+        # 1. 加载主模型
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, 
+            quantization_config=quantization_config,
             trust_remote_code=True,
             torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            # attn_implementation="flash_attention_2"
+            low_cpu_mem_usage=True
         )
         
+        # 2. [核心修改] 暴力查找并删除 Audio Encoder
+        # Qwen-Audio 的原生 encoder 非常大且在此项目中无用，删除它能节省大量显存
+        print(f"🧹 Initial VRAM: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print("🧹 Attempting to remove unused Audio Encoder weights...")
+
+        removed = False
+        target_modules = ["audio_encoder", "visual"] 
+        
+        # 尝试从常见路径删除
+        if hasattr(self.llm, "transformer"):
+            for target in target_modules:
+                if hasattr(self.llm.transformer, target):
+                    delattr(self.llm.transformer, target)
+                    removed = True
+                    print(f"✅ Removed: self.llm.transformer.{target}")
+
+        if not removed and hasattr(self.llm, "audio_encoder"):
+            del self.llm.audio_encoder
+            removed = True
+            print("✅ Removed: self.llm.audio_encoder")
+
+        # 3. [重要] 强制垃圾回收和显存释放
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"✅ Cleanup finished. Current VRAM: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
+        # Helper to get embeddings
         if hasattr(self.llm, "model") and hasattr(self.llm.model, "embed_tokens"):
             self.get_input_embeddings = lambda: self.llm.model.embed_tokens
             llm_hidden_size = self.llm.config.hidden_size
@@ -154,8 +185,13 @@ class QwenCALM(PreTrainedModel):
              self.get_input_embeddings = lambda: self.llm.transformer.wte
              llm_hidden_size = self.llm.config.hidden_size
         else:
-            raise ValueError("Unsupported Qwen Architecture")
-        
+            try:
+                llm_hidden_size = self.llm.config.hidden_size
+                self.get_input_embeddings = self.llm.get_input_embeddings
+            except:
+                raise ValueError("Unsupported Qwen Architecture")
+
+        # VAE Setup
         self.use_precomputed_latents = config.use_precomputed_latents
         if not self.use_precomputed_latents:
             print(f"Loading VAE from {config.vae_path}...")
@@ -167,6 +203,7 @@ class QwenCALM(PreTrainedModel):
             print("Using precomputed latents, skipping VAE loading.")
             vae_latent_dim = config.latent_dim
 
+        # Projectors
         self.input_proj = nn.Linear(vae_latent_dim, llm_hidden_size)
         self.output_head = MLPGenerator(
             input_dim=llm_hidden_size, 
@@ -176,7 +213,6 @@ class QwenCALM(PreTrainedModel):
         )
         self.output_head.initialize_weights()
 
-        # Energy Params
         self.num_samples = config.num_samples
         self.beta = config.beta
         self.temperature = config.temperature
@@ -187,10 +223,7 @@ class QwenCALM(PreTrainedModel):
         return self.get_input_embeddings()(input_ids)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        try:
-            self.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
-        except TypeError:
-            self.llm.gradient_checkpointing_enable()
+        self.llm.gradient_checkpointing_enable()
 
     def gradient_checkpointing_disable(self):
         self.llm.gradient_checkpointing_disable()
@@ -222,13 +255,10 @@ class QwenCALM(PreTrainedModel):
         distance_y = self.distance(x_, y_).mean(dim=(0, 1))
         
         score = distance_x - distance_y * 2
-        
         return score, distance_x, distance_y
 
     def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None, return_dict=None, **kwargs):
-        # Check return dict
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         batch_size = text_input_ids.shape[0]
         device = text_input_ids.device
         
@@ -239,17 +269,15 @@ class QwenCALM(PreTrainedModel):
         with torch.no_grad():
             if self.use_precomputed_latents:
                 gt_latents = audio_features.transpose(1, 2)
-                # Fallback if precomputed latents don't have variance info
                 gt_mean = gt_latents
                 gt_log_std = torch.zeros_like(gt_mean) - 5.0 
             else:
-                # [Important] Ensure VAE returns (mu, log_var)
                 vae_out = self.vae.encode(audio_features)
                 if isinstance(vae_out, tuple):
                     mu, log_var = vae_out
                 else:
                     mu = vae_out
-                    log_var = torch.zeros_like(mu) - 5.0 # Fallback
+                    log_var = torch.zeros_like(mu) - 5.0 
                 
                 gt_mean = mu.transpose(1, 2)
                 raw_log_std = log_var.transpose(1, 2) * 0.5
@@ -267,15 +295,14 @@ class QwenCALM(PreTrainedModel):
                     downsample_rate,
                     rounding_mode='floor'
                 )
-            
             audio_mask = torch.arange(T_aud, device=device)[None, :] < latent_lens[:, None]
             audio_mask = audio_mask.to(dtype=torch.long)
         else:
             audio_mask = torch.ones((B_aud, T_aud), device=device, dtype=torch.long)
 
-        # 3. Project to LLM dimension
+        # 3. Project
         audio_embeds = self.input_proj(gt_mean) 
-        text_embeds = self.get_text_embeddings(text_input_ids) # Use helper method
+        text_embeds = self.get_text_embeddings(text_input_ids) 
         
         if attention_mask is None:
             attention_mask = torch.ones((batch_size, text_input_ids.shape[1]), device=device, dtype=torch.long)
@@ -289,56 +316,37 @@ class QwenCALM(PreTrainedModel):
         tts_count = 0
         asr_count = 0
         
-        # === TTS (Text -> Audio) ===
+        # === TTS ===
         tts_indices = [i for i, m in enumerate(task_modes) if m == "tts"]
         if len(tts_indices) > 0:
             idx = torch.tensor(tts_indices, device=device)
-            
             sub_text = text_embeds[idx]       
             sub_audio = audio_embeds[idx]     
             sub_text_mask = attention_mask[idx]
             sub_audio_mask = audio_mask[idx]
             
-            # Input construction: [Pad, Text, Audio_Prefix]
             inp = torch.cat([sub_text, sub_audio[:, :-1, :]], dim=1)
             full_mask = torch.cat([sub_text_mask, sub_audio_mask[:, :-1]], dim=1)
-            
-            position_ids = full_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(full_mask == 0, 1)
             
             out = self.llm(
                 inputs_embeds=inp, 
                 attention_mask=full_mask, 
-                position_ids=position_ids, 
                 output_hidden_states=True
             )
             last_hidden = out.hidden_states[-1]
-            
-            # Extract Audio Part Hidden States
             txt_len = sub_text.shape[1]
             audio_hidden = last_hidden[:, txt_len-1:, :] 
             
-            # Prepare Ground Truth
             sub_gt_mean = gt_mean[idx]
             sub_gt_log_std = gt_log_std[idx]
-            
-            # --- Energy Loss Calculation (Optimized with Masking) ---
-            # Instead of masking the loss, we select valid tokens first
             tts_mask = sub_audio_mask[:, :sub_gt_mean.size(1)].bool()
-            
-            # Flatten: Select only valid frames across the batch
-            valid_hidden = audio_hidden[tts_mask]       # [N_total_frames, 4096]
-            valid_gt_mean = sub_gt_mean[tts_mask]       # [N_total_frames, 64]
-            valid_gt_log_std = sub_gt_log_std[tts_mask] # [N_total_frames, 64]
+            valid_hidden = audio_hidden[tts_mask]
+            valid_gt_mean = sub_gt_mean[tts_mask]
+            valid_gt_log_std = sub_gt_log_std[tts_mask]
             
             if valid_hidden.shape[0] > 0:
-                # Repeat hidden states for multiple samples [num_samples, N_frames, dim]
                 hidden_repeated = valid_hidden.unsqueeze(0).repeat(self.num_samples, 1, 1)
-                
-                # Generate predictions
                 latent_pred = self.output_head.sample(hidden_repeated, temperature=self.temperature)
-                
-                # Calculate Energy Score (we minimize NEGATIVE score)
                 raw_score, raw_div, raw_fid = self.energy_score(latent_pred, valid_gt_mean, valid_gt_log_std)
                 
                 tts_step_loss = -raw_score.mean()
@@ -349,15 +357,13 @@ class QwenCALM(PreTrainedModel):
                 accum_tts_loss += tts_step_loss
                 accum_div_loss += div_val
                 accum_fid_loss += fid_val
-                
                 tts_count += 1
                 valid_samples += 1
 
-        # === ASR (Audio -> Text) ===
+        # === ASR ===
         asr_indices = [i for i, m in enumerate(task_modes) if m == "asr"]
         if len(asr_indices) > 0:
             idx = torch.tensor(asr_indices, device=device)
-            
             sub_audio = audio_embeds[idx]
             sub_text = text_embeds[idx]
             sub_labels = labels[idx]
@@ -371,46 +377,41 @@ class QwenCALM(PreTrainedModel):
             prefix_labels = torch.full((B_sub, T_aud), -100, dtype=torch.long, device=device)
             full_labels = torch.cat([prefix_labels, sub_labels], dim=1)
             
-            position_ids = full_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(full_mask == 0, 1)
-            
             out = self.llm(
                 inputs_embeds=inp, 
                 attention_mask=full_mask, 
-                position_ids=position_ids,
                 output_hidden_states=True
             )
-            
-            logits = self.llm.lm_head(out.hidden_states[-1])
+            # 兼容不同版本的 Qwen 输出
+            if hasattr(self.llm, "lm_head"):
+                logits = self.llm.lm_head(out.hidden_states[-1])
+            else:
+                logits = out.logits
+
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = full_labels[..., 1:].contiguous()
             
             loss_fct = nn.CrossEntropyLoss()
-            loss_asr = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), 
-                shift_labels.view(-1)
-            )
+            loss_asr = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             
             total_loss += loss_asr
             valid_samples += 1
             accum_asr_loss += loss_asr
             asr_count += 1
 
-        # Handling dummy loss for DDP to avoid unused parameter errors
+        # Dummy Loss
         if len(tts_indices) == 0:
             dummy_hidden = audio_embeds[:, :1, :].mean() 
             dummy_in = torch.zeros((1, 1, 4096), device=device, dtype=audio_embeds.dtype)
             dummy_pred = self.output_head.sample(dummy_in)
             total_loss += (dummy_pred.sum() * 0.0) + (dummy_hidden * 0.0)
 
-        if len(asr_indices) == 0 and self.llm.lm_head.weight.requires_grad:
+        if len(asr_indices) == 0 and hasattr(self.llm, "lm_head") and self.llm.lm_head.weight.requires_grad:
              dummy_in = text_embeds[:, :1, :] * 0
              dummy_logits = self.llm.lm_head(dummy_in)
              total_loss += dummy_logits.sum() * 0.0
 
-        if valid_samples > 1: # Already summed, just normalization if needed? 
-            # In mixed training, usually we average over tasks or just sum. 
-            # Here keeping simple sum / count logic.
+        if valid_samples > 1:
             total_loss = total_loss / valid_samples
             
         avg_tts = accum_tts_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
@@ -418,13 +419,12 @@ class QwenCALM(PreTrainedModel):
         avg_div = accum_div_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
         avg_fid = accum_fid_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
         
-        # [MODIFIED] Return custom output object
         if not return_dict:
-            return (total_loss, None) # Or logits if you had them for the whole batch
+            return (total_loss, None)
             
         return CalmModelOutput(
             loss=total_loss,
-            logits=None, # We don't return full logits to save memory unless needed
+            logits=None,
             hidden_states=out.hidden_states if kwargs.get("output_hidden_states") else None,
             attentions=out.attentions if kwargs.get("output_attentions") else None,
             loss_tts=avg_tts,
@@ -436,20 +436,15 @@ class QwenCALM(PreTrainedModel):
     def save_pretrained(self, save_directory, **kwargs):
         self.config.save_pretrained(save_directory)
         self.llm.save_pretrained(save_directory) 
-        
         state_dict = kwargs.get("state_dict", None)
-        
-        # Helper to save specific modules
         def save_module(module, name, state_dict=None):
             if state_dict is None:
                 sd = module.state_dict()
             else:
                 sd = {k.replace(f"{name}.", ""): v for k, v in state_dict.items() if k.startswith(f"{name}.")}
             torch.save(sd, os.path.join(save_directory, f"{name}.bin"))
-
         save_module(self.input_proj, "input_proj", state_dict)
         save_module(self.output_head, "output_head", state_dict)
 
-# [MODIFIED] Register AutoConfig and AutoModel
 AutoConfig.register("qwen_calm", QwenCALMConfig)
 AutoModel.register(QwenCALMConfig, QwenCALM)
