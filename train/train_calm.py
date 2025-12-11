@@ -54,11 +54,12 @@ class DataArguments:
     train_subsets: str = field(default="train-clean-100,train-clean-360,train-other-500")
     eval_subsets: str = field(default="dev-clean")
     max_text_len: int = field(default=256)
-    max_audio_len: int = field(default=512, metadata={"help": "Max Mel frames. If using latents, this will be scaled down by 16 automatically inside dataset logic."})
+    max_audio_len: int = field(default=512, metadata={"help": "Max Latent frames. (e.g. 128 latents ~= 32s audio)"})
     latent_downsample: int = field(default=4)
+    task_mode: str = field(default="asr", metadata={"help": "Training mode: 'joint', 'asr', or 'tts'"})
 
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16, is_eval=False):
+    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16, is_eval=False, task_mode="joint"):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
@@ -66,10 +67,11 @@ class CalmDataset(Dataset):
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eod_id
         self.latent_downsample = latent_downsample
         self.is_eval = is_eval
+        self.task_mode = task_mode # 'joint', 'asr', 'tts'
         
         self.data = []
         subset_list = subsets.split(",")
-        print(f"Scanning pairs in {subset_list}...")
+        print(f"Scanning pairs in {subset_list} (Mode: {self.task_mode})...")
         
         file_index = {}
         for subset in subset_list:
@@ -79,8 +81,6 @@ class CalmDataset(Dataset):
             for f in files:
                 key = os.path.splitext(os.path.basename(f))[0]
                 file_index[key] = f
-        
-        print(f"Indexed {len(file_index)} audio files.")
         
         for subset in subset_list:
             subset_dir = os.path.join(librispeech_root, subset.strip())
@@ -96,27 +96,23 @@ class CalmDataset(Dataset):
                                     file_id, text = parts
                                     if file_id in file_index:
                                         self.data.append({"text": text, "file_path": file_index[file_id]})
-                        except Exception as e:
-                            pass
+                        except: pass
         print(f"Total matched pairs: {len(self.data)}")
         
-        print("Pre-loading all latents into RAM (approx 3-4GB)...")
+        print("Pre-loading all latents into RAM...")
         self.cached_latents = {}
         def load_file(idx_item_tuple):
             i, item = idx_item_tuple
             try:
-                # 转换 float16 节省内存
                 tensor = torch.load(item['file_path'], map_location="cpu").to(torch.float16)
                 return item['file_path'], tensor
-            except Exception as e:
-                return None, None
+            except: return None, None
 
         with ThreadPoolExecutor(max_workers=16) as executor:
             futures = [executor.submit(load_file, (i, item)) for i, item in enumerate(self.data)]
-            for future in tqdm(as_completed(futures), total=len(self.data), desc="Loading Latents"):
+            for future in tqdm(as_completed(futures), total=len(self.data), desc="Loading"):
                 path, tensor = future.result()
                 if path is not None: self.cached_latents[path] = tensor
-        print(f"Cached {len(self.cached_latents)} latent files.")
 
     def __len__(self):
         return len(self.data)
@@ -132,10 +128,16 @@ class CalmDataset(Dataset):
             item = self.data[idx]
             text_content = item['text']
             
-            if self.is_eval:
-                task_mode = "tts" if idx % 2 == 0 else "asr"
+            # [MODIFIED] Task Selection Logic
+            if self.task_mode == "joint":
+                # Original logic: alternating for eval, random for train
+                if self.is_eval:
+                    task_mode = "tts" if idx % 2 == 0 else "asr"
+                else:
+                    task_mode = "tts" if random.random() < 0.5 else "asr"
             else:
-                task_mode = "tts" if random.random() < 0.5 else "asr"
+                # Forced mode (ASR or TTS)
+                task_mode = self.task_mode
             
             if task_mode == "tts":
                 prompt = f"<|im_start|>user\nRead this: {text_content}<|im_end|>\n<|im_start|>assistant\n"
@@ -219,18 +221,11 @@ def data_collator(features, pad_id):
 class CalmTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.meter_tts_loss = 0.0
-        self.meter_tts_count = 0
-        self.meter_asr_loss = 0.0
-        self.meter_asr_count = 0
-        self.meter_div_loss = 0.0
-        self.meter_fid_loss = 0.0
+        self.meter_tts_loss = 0.0; self.meter_tts_count = 0
+        self.meter_asr_loss = 0.0; self.meter_asr_count = 0
+        self.meter_div_loss = 0.0; self.meter_fid_loss = 0.0
         self.eval_meters = {}
         
-    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        loss, logits, labels = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
-        return loss, logits, labels
-
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(
             text_input_ids=inputs["text_input_ids"],
@@ -284,17 +279,14 @@ class CalmTrainer(Trainer):
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         self.eval_meters = {}
         output = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-        
         if "eval_tts_count" in self.eval_meters and self.eval_meters["eval_tts_count"] > 0:
             count = self.eval_meters["eval_tts_count"]
             output[f"{metric_key_prefix}_tts_loss"] = self.eval_meters["eval_tts_loss"] / count
             output[f"{metric_key_prefix}_div_loss"] = self.eval_meters["eval_div_loss"] / count
             output[f"{metric_key_prefix}_fid_loss"] = self.eval_meters["eval_fid_loss"] / count
-        
         if "eval_asr_count" in self.eval_meters and self.eval_meters["eval_asr_count"] > 0:
             count = self.eval_meters["eval_asr_count"]
             output[f"{metric_key_prefix}_asr_loss"] = self.eval_meters["eval_asr_loss"] / count
-
         self.log(output)
         return output
     
@@ -319,13 +311,9 @@ class CalmTrainer(Trainer):
         logs["diversity_loss"] = round(div_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         logs["fidelity_loss"] = round(fid_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         
-        self.meter_tts_loss = 0.0
-        self.meter_tts_count = 0
-        self.meter_asr_loss = 0.0
-        self.meter_asr_count = 0
-        self.meter_div_loss = 0.0
-        self.meter_fid_loss = 0.0
-
+        self.meter_tts_loss = 0.0; self.meter_tts_count = 0
+        self.meter_asr_loss = 0.0; self.meter_asr_count = 0
+        self.meter_div_loss = 0.0; self.meter_fid_loss = 0.0
         super().log(logs)
 
     def create_optimizer(self):
@@ -384,7 +372,6 @@ def main():
         temperature=model_args.temperature
     )
     
-    # [QLoRA Config]
     bnb_config = None
     if model_args.use_qlora:
         print("💡 Enabling 4-bit QLoRA Quantization...")
@@ -395,16 +382,12 @@ def main():
             bnb_4bit_compute_dtype=torch.bfloat16
         )
 
-    # Initialize Model with Quantization Config
     model = QwenCALM(calm_config, quantization_config=bnb_config)
     
-    # [Prepare for QLoRA]
     if model_args.use_qlora:
         print("🔧 Preparing model for k-bit training...")
-        # [重点] 显式设置为 False，避免初始化死锁，Trainer 会在之后自动正确开启它
         model.llm = prepare_model_for_kbit_training(model.llm, use_gradient_checkpointing=False)
 
-    # Apply LoRA
     if model_args.use_lora:
         lora_config = LoraConfig(
             r=model_args.lora_rank,
@@ -417,6 +400,7 @@ def main():
         model.llm = get_peft_model(model.llm, lora_config)
         model.llm.print_trainable_parameters()
     
+    # [MODIFIED] Pass task_mode to Datasets
     train_dataset = CalmDataset(
         data_dir=data_args.mel_dir, 
         librispeech_root=data_args.librispeech_root,
@@ -426,7 +410,8 @@ def main():
         max_audio_len=data_args.max_audio_len,
         use_latents=model_args.use_precomputed_latents,
         latent_downsample=data_args.latent_downsample,
-        is_eval=False
+        is_eval=False,
+        task_mode=data_args.task_mode # "asr" here
     )
 
     eval_dir = data_args.eval_mel_dir if data_args.eval_mel_dir else data_args.mel_dir
@@ -439,7 +424,8 @@ def main():
         max_audio_len=data_args.max_audio_len,
         use_latents=model_args.use_precomputed_latents,
         latent_downsample=data_args.latent_downsample,
-        is_eval=True
+        is_eval=True,
+        task_mode=data_args.task_mode # Consistent with train
     )
     
     trainer = CalmTrainer(

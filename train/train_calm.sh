@@ -18,6 +18,8 @@ LIBRISPEECH_ROOT="/data0/determined/users/andywu/speechcalm/data/full_librispeec
 PER_DEVICE_BATCH_SIZE=2
 GRAD_ACCUM=8 
 
+TASK_MODE="asr"
+
 # 开启 4-bit 量化
 USE_QLORA=True
 
@@ -66,6 +68,8 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --eval_subsets "dev-clean" \
     --max_text_len 256 \
     --max_audio_len 512 \
+    \
+    --task_mode "$TASK_MODE" \
     \
     --per_device_train_batch_size $PER_DEVICE_BATCH_SIZE \
     --per_device_eval_batch_size 1 \

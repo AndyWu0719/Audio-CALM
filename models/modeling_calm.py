@@ -101,6 +101,21 @@ class MLPGenerator(nn.Module):
 
         latent_prediction = self.final_layer(noise_embds)
         return latent_prediction
+    
+class CalmProjector(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim=None):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = output_dim
+        
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        
+    def forward(self, x):
+        return self.net(x)
 
 # =============================================================================
 # Qwen-CALM Model Definition
@@ -204,20 +219,23 @@ class QwenCALM(PreTrainedModel):
             vae_latent_dim = config.latent_dim
 
         # Projectors
-        self.input_proj = nn.Linear(vae_latent_dim, llm_hidden_size)
+        self.input_proj = CalmProjector(vae_latent_dim, llm_hidden_size)
         self.output_head = MLPGenerator(
             input_dim=llm_hidden_size, 
             output_dim=vae_latent_dim,
             noise_size=config.noise_size,
             num_mlp_layers=config.num_mlp_layers
         )
+        for m in self.input_proj.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
         self.output_head.initialize_weights()
 
         self.num_samples = config.num_samples
         self.beta = config.beta
         self.temperature = config.temperature
-        
-        nn.init.normal_(self.input_proj.weight, std=0.02)
         
     def get_text_embeddings(self, input_ids):
         return self.get_input_embeddings()(input_ids)
