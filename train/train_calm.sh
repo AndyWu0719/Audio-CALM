@@ -37,6 +37,7 @@ echo "Train Data Dir: $TRAIN_DATA_DIR"
 echo "Eval Data Dir: $EVAL_DATA_DIR"
 
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
+    --deepspeed ds_config.json \
     --do_train \
     --run_name "$RUN_NAME" \
     --output_dir "$OUTPUT_DIR" \
