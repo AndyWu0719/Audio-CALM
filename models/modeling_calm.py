@@ -1,10 +1,28 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, PreTrainedModel, PretrainedConfig
+from transformers import AutoModelForCausalLM, PreTrainedModel, PretrainedConfig, AutoConfig, AutoModel
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from models.modeling_vae import AcousticVAE
 import os
 import math
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+# =============================================================================
+# 0. Custom Output Class (New Standard HF Output)
+# =============================================================================
+
+@dataclass
+class CalmModelOutput(CausalLMOutputWithPast):
+    """
+    Base class for CALM model outputs, adding custom loss terms.
+    """
+    loss: Optional[torch.FloatTensor] = None
+    loss_tts: Optional[torch.FloatTensor] = None
+    loss_asr: Optional[torch.FloatTensor] = None
+    loss_diversity: Optional[torch.FloatTensor] = None
+    loss_fidelity: Optional[torch.FloatTensor] = None
 
 # =============================================================================
 # Energy-Based Components (Ported from CALM)
@@ -96,10 +114,9 @@ class QwenCALMConfig(PretrainedConfig):
                  vae_path=None, 
                  use_precomputed_latents=False, 
                  latent_dim=64,
-                 # Energy-specific configs
                  noise_size=64,
                  num_mlp_layers=2,
-                 num_samples=8,      # Number of samples to draw during training
+                 num_samples=8,
                  beta=0.25,
                  temperature=1.0,
                  **kwargs):
@@ -121,46 +138,53 @@ class QwenCALM(PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         
-        print(f"Loading Qwen from {config.qwen_path}...")
+        print(f"Loading LLM from {config.qwen_path}...")
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, 
             trust_remote_code=True,
             torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=True,
+            # attn_implementation="flash_attention_2"
         )
         
+        if hasattr(self.llm, "model") and hasattr(self.llm.model, "embed_tokens"):
+            self.get_input_embeddings = lambda: self.llm.model.embed_tokens
+            llm_hidden_size = self.llm.config.hidden_size
+        elif hasattr(self.llm, "transformer") and hasattr(self.llm.transformer, "wte"):
+             self.get_input_embeddings = lambda: self.llm.transformer.wte
+             llm_hidden_size = self.llm.config.hidden_size
+        else:
+            raise ValueError("Unsupported Qwen Architecture")
+        
         self.use_precomputed_latents = config.use_precomputed_latents
-        
-        vae_latent_dim = 64
-        
         if not self.use_precomputed_latents:
             print(f"Loading VAE from {config.vae_path}...")
             self.vae = AcousticVAE.from_pretrained(config.vae_path)
-            for param in self.vae.parameters():
-                param.requires_grad = False
+            self.vae.requires_grad_(False)
             self.vae.eval()
             vae_latent_dim = self.vae.config.latent_channels
         else:
-            print("Skipping VAE loading (Using precomputed latents).")
+            print("Using precomputed latents, skipping VAE loading.")
             vae_latent_dim = config.latent_dim
 
-        qwen_dim = self.llm.config.hidden_size
-        self.input_proj = nn.Linear(vae_latent_dim, qwen_dim)
-        
+        self.input_proj = nn.Linear(vae_latent_dim, llm_hidden_size)
         self.output_head = MLPGenerator(
-            input_dim=qwen_dim, 
+            input_dim=llm_hidden_size, 
             output_dim=vae_latent_dim,
             noise_size=config.noise_size,
             num_mlp_layers=config.num_mlp_layers
         )
         self.output_head.initialize_weights()
 
-        # Energy Loss parameters
+        # Energy Params
         self.num_samples = config.num_samples
         self.beta = config.beta
         self.temperature = config.temperature
         
         nn.init.normal_(self.input_proj.weight, std=0.02)
+        
+    def get_text_embeddings(self, input_ids):
+        return self.get_input_embeddings()(input_ids)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         try:
@@ -201,7 +225,10 @@ class QwenCALM(PreTrainedModel):
         
         return score, distance_x, distance_y
 
-    def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None):
+    def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None, return_dict=None, **kwargs):
+        # Check return dict
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
         batch_size = text_input_ids.shape[0]
         device = text_input_ids.device
         
@@ -217,7 +244,6 @@ class QwenCALM(PreTrainedModel):
                 gt_log_std = torch.zeros_like(gt_mean) - 5.0 
             else:
                 # [Important] Ensure VAE returns (mu, log_var)
-                # If your VAE only returns one value, check modeling_vae.py
                 vae_out = self.vae.encode(audio_features)
                 if isinstance(vae_out, tuple):
                     mu, log_var = vae_out
@@ -249,7 +275,7 @@ class QwenCALM(PreTrainedModel):
 
         # 3. Project to LLM dimension
         audio_embeds = self.input_proj(gt_mean) 
-        text_embeds = self.llm.transformer.wte(text_input_ids) 
+        text_embeds = self.get_text_embeddings(text_input_ids) # Use helper method
         
         if attention_mask is None:
             attention_mask = torch.ones((batch_size, text_input_ids.shape[1]), device=device, dtype=torch.long)
@@ -385,8 +411,6 @@ class QwenCALM(PreTrainedModel):
         if valid_samples > 1: # Already summed, just normalization if needed? 
             # In mixed training, usually we average over tasks or just sum. 
             # Here keeping simple sum / count logic.
-            # If tts_count=1 and asr_count=1, total_loss has sum. 
-            # Let's just divide by valid_samples to denote "loss per task batch"
             total_loss = total_loss / valid_samples
             
         avg_tts = accum_tts_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
@@ -394,14 +418,20 @@ class QwenCALM(PreTrainedModel):
         avg_div = accum_div_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
         avg_fid = accum_fid_loss / tts_count if tts_count > 0 else torch.tensor(0.0, device=device)
         
-        return {
-            "loss": total_loss,
-            "loss_tts": avg_tts,
-            "loss_asr": avg_asr,
-            "loss_diversity": avg_div,
-            "loss_fidelity": avg_fid,
-            "logits": None 
-        }
+        # [MODIFIED] Return custom output object
+        if not return_dict:
+            return (total_loss, None) # Or logits if you had them for the whole batch
+            
+        return CalmModelOutput(
+            loss=total_loss,
+            logits=None, # We don't return full logits to save memory unless needed
+            hidden_states=out.hidden_states if kwargs.get("output_hidden_states") else None,
+            attentions=out.attentions if kwargs.get("output_attentions") else None,
+            loss_tts=avg_tts,
+            loss_asr=avg_asr,
+            loss_diversity=avg_div,
+            loss_fidelity=avg_fid
+        )
     
     def save_pretrained(self, save_directory, **kwargs):
         self.config.save_pretrained(save_directory)
@@ -419,3 +449,7 @@ class QwenCALM(PreTrainedModel):
 
         save_module(self.input_proj, "input_proj", state_dict)
         save_module(self.output_head, "output_head", state_dict)
+
+# [MODIFIED] Register AutoConfig and AutoModel
+AutoConfig.register("qwen_calm", QwenCALMConfig)
+AutoModel.register(QwenCALMConfig, QwenCALM)

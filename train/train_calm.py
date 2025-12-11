@@ -15,6 +15,8 @@ from torch.optim import AdamW
 from models.modeling_calm import QwenCALM, QwenCALMConfig
 from peft import LoraConfig, get_peft_model, TaskType
 from functools import partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -43,7 +45,7 @@ class DataArguments:
     train_subsets: str = field(default="train-clean-100,train-clean-360,train-other-500")
     eval_subsets: str = field(default="dev-clean")
     max_text_len: int = field(default=256)
-    max_audio_len: int = field(default=2048, metadata={"help": "Max Mel frames. If using latents, this will be scaled down by 16 automatically inside dataset logic."})
+    max_audio_len: int = field(default=512, metadata={"help": "Max Mel frames. If using latents, this will be scaled down by 16 automatically inside dataset logic."})
     latent_downsample: int = field(default=4)
 
 class CalmDataset(Dataset):
@@ -98,6 +100,27 @@ class CalmDataset(Dataset):
                         except Exception as e:
                             pass
         print(f"Total matched pairs: {len(self.data)}")
+        
+        # 3. RAM Cache Preloading
+        print("Pre-loading all latents into RAM (approx 3-4GB)...")
+        self.cached_latents = {}
+        
+        def load_file(idx_item_tuple):
+            i, item = idx_item_tuple
+            try:
+                # Load to CPU, float16 to save RAM
+                tensor = torch.load(item['file_path'], map_location="cpu").to(torch.float16)
+                return item['file_path'], tensor
+            except Exception as e:
+                return None, None
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(load_file, (i, item)) for i, item in enumerate(self.data)]
+            for future in tqdm(as_completed(futures), total=len(self.data), desc="Loading Latents"):
+                path, tensor = future.result()
+                if path is not None:
+                    self.cached_latents[path] = tensor
+        print(f"Cached {len(self.cached_latents)} latent files.")
 
     def __len__(self):
         return len(self.data)
@@ -118,9 +141,6 @@ class CalmDataset(Dataset):
             else:
                 task_mode = "tts" if random.random() < 0.5 else "asr"
             
-            # === Task ===
-            task_mode = "tts" if random.random() < 0.5 else "asr"
-            
             if task_mode == "tts":
                 prompt = f"<|im_start|>user\nRead this: {text_content}<|im_end|>\n<|im_start|>assistant\n"
                 text_ids = self.tokenizer.encode(prompt)
@@ -136,13 +156,15 @@ class CalmDataset(Dataset):
                 text_ids = text_ids[:self.max_text_len]
                 labels = labels[:self.max_text_len]
 
-            # === Audio ===
-            # Load: latents, shape [64, T] or mel, shape [80, T]
-            audio = torch.load(item['file_path'], map_location="cpu") 
+            # === [FIXED] Audio Loading (Check Cache First) ===
+            path = item['file_path']
+            if path in self.cached_latents:
+                audio = self.cached_latents[path].float() # Convert back to float32
+            else:
+                audio = torch.load(path, map_location="cpu")
             
             # Calculate Target Length
             if self.use_latents:
-                # Max Audio Len refers to Mel frames, Latent should be / total_stride
                 TARGET_LEN = self.max_audio_len // self.latent_downsample
             else:
                 TARGET_LEN = self.max_audio_len
@@ -156,7 +178,6 @@ class CalmDataset(Dataset):
             else:
                 pad_len = TARGET_LEN - audio.shape[1]
                 audio = torch.nn.functional.pad(audio, (0, pad_len))
-                # real_audio_len remains the original value
                 
         except Exception as e:
             print(f"[Dataset Error] idx={idx}: {e}")
@@ -172,7 +193,7 @@ class CalmDataset(Dataset):
 def data_collator(features, pad_id):
     valid_features = [f for f in features if f["audio_features"].shape[1] > 0]
     if not valid_features:
-        valid_features = features
+        return {}
 
     text_ids = [f["text_ids"] for f in valid_features]
     labels = [f["labels"] for f in valid_features]
@@ -193,7 +214,6 @@ def data_collator(features, pad_id):
     labels_padded = torch.stack(padded_labels)
     attention_mask = torch.stack(text_attention_masks)
     
-    # Audio
     audio_features = torch.stack([f["audio_features"] for f in valid_features])
     audio_lens = torch.tensor([f["real_audio_len"] for f in valid_features], dtype=torch.long)
     task_modes = [f["task_mode"] for f in valid_features]
@@ -210,6 +230,7 @@ def data_collator(features, pad_id):
 class CalmTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Initialize accumulators
         self.meter_tts_loss = 0.0
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
@@ -232,25 +253,41 @@ class CalmTrainer(Trainer):
             labels=inputs["labels"],
             task_modes=inputs["task_modes"]
         )
-        loss = outputs["loss"]
         
-        avg_tts = outputs.get("loss_tts", torch.tensor(0.0)).item()
-        avg_asr = outputs.get("loss_asr", torch.tensor(0.0)).item()
-        avg_div = outputs.get("loss_diversity", torch.tensor(0.0)).item()
-        avg_fid = outputs.get("loss_fidelity", torch.tensor(0.0)).item()
+        # Access attributes safely from CalmModelOutput
+        loss = outputs.loss
         
-        task_modes = inputs.get("task_modes", [])
-        num_tts = task_modes.count("tts")
-        num_asr = task_modes.count("asr")
-
+        # === [FIXED] Accumulate metrics here, DO NOT call self.log() directly ===
         if self.model.training:
-            self.meter_tts_loss += avg_tts * num_tts
+            # We access the raw tensors. For proper DDP average, the custom log() below handles reduce.
+            # Here we just accumulate local sums.
+            task_modes = inputs.get("task_modes", [])
+            num_tts = task_modes.count("tts")
+            num_asr = task_modes.count("asr")
+            
+            # Using getattr to be safe
+            loss_tts = getattr(outputs, "loss_tts", torch.tensor(0.0)).item()
+            loss_asr = getattr(outputs, "loss_asr", torch.tensor(0.0)).item()
+            loss_div = getattr(outputs, "loss_diversity", torch.tensor(0.0)).item()
+            loss_fid = getattr(outputs, "loss_fidelity", torch.tensor(0.0)).item()
+
+            self.meter_tts_loss += loss_tts * num_tts
             self.meter_tts_count += num_tts
-            self.meter_asr_loss += avg_asr * num_asr
+            self.meter_asr_loss += loss_asr * num_asr
             self.meter_asr_count += num_asr
-            self.meter_div_loss += avg_div * num_tts
-            self.meter_fid_loss += avg_fid * num_tts
+            self.meter_div_loss += loss_div * num_tts
+            self.meter_fid_loss += loss_fid * num_tts
         else:
+            # Evaluation accumulation
+            task_modes = inputs.get("task_modes", [])
+            num_tts = task_modes.count("tts")
+            num_asr = task_modes.count("asr")
+            
+            loss_tts = getattr(outputs, "loss_tts", torch.tensor(0.0)).item()
+            loss_asr = getattr(outputs, "loss_asr", torch.tensor(0.0)).item()
+            loss_div = getattr(outputs, "loss_diversity", torch.tensor(0.0)).item()
+            loss_fid = getattr(outputs, "loss_fidelity", torch.tensor(0.0)).item()
+
             if "eval_tts_loss" not in self.eval_meters:
                 self.eval_meters = {
                     "eval_tts_loss": 0.0, "eval_tts_count": 0,
@@ -258,18 +295,17 @@ class CalmTrainer(Trainer):
                     "eval_div_loss": 0.0, "eval_fid_loss": 0.0
                 }
             
-            self.eval_meters["eval_tts_loss"] += avg_tts * num_tts
+            self.eval_meters["eval_tts_loss"] += loss_tts * num_tts
             self.eval_meters["eval_tts_count"] += num_tts
-            self.eval_meters["eval_asr_loss"] += avg_asr * num_asr
+            self.eval_meters["eval_asr_loss"] += loss_asr * num_asr
             self.eval_meters["eval_asr_count"] += num_asr
-            self.eval_meters["eval_div_loss"] += avg_div * num_tts
-            self.eval_meters["eval_fid_loss"] += avg_fid * num_tts
-             
+            self.eval_meters["eval_div_loss"] += loss_div * num_tts
+            self.eval_meters["eval_fid_loss"] += loss_fid * num_tts
+
         return (loss, outputs) if return_outputs else loss
     
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         self.eval_meters = {}
-        
         output = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
         
         if "eval_tts_count" in self.eval_meters and self.eval_meters["eval_tts_count"] > 0:
@@ -283,10 +319,10 @@ class CalmTrainer(Trainer):
             output[f"{metric_key_prefix}_asr_loss"] = self.eval_meters["eval_asr_loss"] / count
 
         self.log(output)
-        
         return output
     
     def log(self, logs: Dict[str, float]) -> None:
+        # Calculate averages from accumulators
         if self.args.world_size > 1:
             metrics = torch.tensor([
                 self.meter_tts_loss, float(self.meter_tts_count),
@@ -309,6 +345,7 @@ class CalmTrainer(Trainer):
         logs["diversity_loss"] = round(div_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         logs["fidelity_loss"] = round(fid_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
         
+        # Reset accumulators after logging
         self.meter_tts_loss = 0.0
         self.meter_tts_count = 0
         self.meter_asr_loss = 0.0
@@ -319,54 +356,28 @@ class CalmTrainer(Trainer):
         super().log(logs)
 
     def create_optimizer(self):
-        """
-        Override the default optimizer to set specific learning rates for Projector and Head.
-        """
         if self.optimizer is None:
             decay_parameters = []
             no_decay_parameters = []
-            
-            # Define parameter groups for specific components
             projector_parameters = []
-            
-            # 1. Distinguish Projector/Head and other parameters (LLM/LoRA)
-            # Note: model.input_proj and model.output_head are members of QwenCALM
             head_names = ["input_proj", "output_head"]
             
             for name, param in self.model.named_parameters():
-                if not param.requires_grad:
-                    continue
+                if not param.requires_grad: continue
                 
-                # Check if belongs to Projector or Head
                 is_head = any(n in name for n in head_names)
-                
                 if is_head:
                     projector_parameters.append(param)
                 else:
-                    # Belongs to LLM (LoRA) parameters
                     if "bias" in name or "LayerNorm" in name:
                         no_decay_parameters.append(param)
                     else:
                         decay_parameters.append(param)
 
-            # 2. Set parameter groups
-            
             optimizer_grouped_parameters = [
-                {
-                    "params": decay_parameters,
-                    "weight_decay": self.args.weight_decay,
-                    "lr": self.args.learning_rate,
-                },
-                {
-                    "params": no_decay_parameters,
-                    "weight_decay": 0.0,
-                    "lr": self.args.learning_rate,
-                },
-                {
-                    "params": projector_parameters,
-                    "weight_decay": self.args.weight_decay,
-                    "lr": 20 * self.args.learning_rate,
-                },
+                {"params": decay_parameters, "weight_decay": self.args.weight_decay, "lr": self.args.learning_rate},
+                {"params": no_decay_parameters, "weight_decay": 0.0, "lr": self.args.learning_rate},
+                {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 20 * self.args.learning_rate},
             ]
 
             self.optimizer = AdamW(
@@ -374,7 +385,6 @@ class CalmTrainer(Trainer):
                 betas=(self.args.adam_beta1, self.args.adam_beta2),
                 eps=self.args.adam_epsilon,
             )
-            
         return self.optimizer
 
 def main():
@@ -383,15 +393,13 @@ def main():
     set_seed(training_args.seed)
 
     if not training_args.ddp_find_unused_parameters:
-        print("Warning: Enforcing ddp_find_unused_parameters=True for mixed tasks.")
         training_args.ddp_find_unused_parameters = True
     
-    # 1. Tokenizer (Set Left Padding)
+    # 1. Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eod_id
     tokenizer.padding_side = 'left' 
-    print(f"Tokenizer padding side: {tokenizer.padding_side}")
 
     # 2. Config & Model
     calm_config = QwenCALMConfig(

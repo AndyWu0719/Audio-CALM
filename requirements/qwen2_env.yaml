@@ -1,0 +1,39 @@
+name: qwen2_audio
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.10
+  # 核心组件
+  - pytorch=2.1.2
+  - torchvision=0.16.2
+  - torchaudio=2.1.2
+  - pytorch-cuda=11.8
+  # 系统依赖
+  - ffmpeg=6.1.1 
+  - git
+  - pip
+  - pip:
+      # --- 核心升级 ---
+      - transformers>=4.40.0
+      - accelerate>=0.30.0
+      - tokenizers>=0.19.0
+      
+      # --- Qwen2-Audio 依赖 ---
+      - deepspeed
+      # [注意] 这里删除了 flash-attn，稍后手动装
+      - tiktoken
+      - einops
+      - transformers-stream-generator
+      - scipy
+      - librosa
+      - soundfile
+      - matplotlib
+      - tensorboard
+      
+      # --- 其他 ---
+      - protobuf
+      - sentencepiece
+      - peft
+      - bitsandbytes

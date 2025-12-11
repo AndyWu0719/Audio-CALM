@@ -62,7 +62,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
     --train_subsets "train-clean-100,train-clean-360,train-other-500" \
     --eval_subsets "dev-clean" \
     --max_text_len 256 \
-    --max_audio_len 2048 \
+    --max_audio_len 512 \
     \
     --per_device_train_batch_size $PER_DEVICE_BATCH_SIZE \
     --per_device_eval_batch_size 1 \
