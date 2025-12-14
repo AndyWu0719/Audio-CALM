@@ -6,13 +6,14 @@ MASTER_PORT=29500
 
 WORK_PATH=$(pwd)
 DATA_DIR="${WORK_PATH}/data/mel_features" 
-OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/audio_vae_8x"
+OUTPUT_DIR="${WORK_PATH}/outputs/checkpoints/audio_vae_4x_kl_annealing"
 
-STRIDES="2 2 2" 
+STRIDES="2 2" 
 LATENT_DIM=64
 HIDDEN_DIM=512
 
-BATCH_SIZE=64
+BATCH_SIZE=32
+CROP_SIZE=512
 GRAD_ACCUM=1
 LR=2e-4
 
@@ -28,8 +29,10 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_vae.py \
     --strides $STRIDES \
     --latent_channels $LATENT_DIM \
     --hidden_channels $HIDDEN_DIM \
-    --kl_weight 0.0001 \
-    --crop_size 256 \
+    --kl_weight 0.001 \
+    --kl_clamp 0.0 \
+    --latent_dropout 0.05 \
+    --crop_size $CROP_SIZE \
     --per_device_train_batch_size $BATCH_SIZE \
     --per_device_eval_batch_size $BATCH_SIZE \
     --gradient_accumulation_steps $GRAD_ACCUM \
@@ -40,7 +43,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_vae.py \
     --save_steps 2000 \
     --save_total_limit 3 \
     --logging_steps 50 \
-    --evaluation_strategy "steps" \
+    --eval_strategy "steps" \
     --eval_steps 2000 \
     --load_best_model_at_end True \
     --metric_for_best_model "loss" \
@@ -49,8 +52,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_vae.py \
     --bf16 True \
     --ddp_find_unused_parameters False \
     --report_to "tensorboard" \
-    --run_name "audio-vae-8x" \
-    --per_device_eval_batch_size 1 \
-    --save_strategy "steps" \
-
+    --run_name "audio_vae_4x_kl_annealing" \
+    --save_strategy "steps" 
+    
 echo "Training finished."

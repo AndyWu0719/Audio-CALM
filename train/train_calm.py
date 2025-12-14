@@ -59,7 +59,7 @@ class DataArguments:
     task_mode: str = field(default="asr", metadata={"help": "Training mode: 'joint', 'asr', or 'tts'"})
 
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=2048, use_latents=False, latent_downsample=16, is_eval=False, task_mode="joint"):
+    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=512, use_latents=False, latent_downsample=16, is_eval=False, task_mode="joint"):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len

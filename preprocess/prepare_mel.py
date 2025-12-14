@@ -22,7 +22,11 @@ class MelExtractor(nn.Module):
             hop_length=HOP_LENGTH,
             n_mels=N_MELS,
             power=2.0,
-            normalized=True
+            normalized=False,
+            f_min=0,
+            f_max=8000,
+            norm="slaney",
+            mel_scale="slaney"
         )
     
     def forward(self, wav):
@@ -67,6 +71,7 @@ def worker_process(rank, file_subset, data_root, output_dir, device_id):
             if wav.shape[0] > 1:
                 wav = torch.mean(wav, dim=0, keepdim=True)
                 
+            wav = wav / (torch.max(torch.abs(wav)) + 1e-8) * 0.95
             wav = wav.to(device)
             with torch.no_grad():
                 mel = extractor(wav) 

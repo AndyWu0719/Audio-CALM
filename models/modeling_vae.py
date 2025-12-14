@@ -13,6 +13,8 @@ class AudioVAEConfig(PretrainedConfig):
         latent_channels=64, 
         strides: List[int] = [2, 2, 2, 2], 
         kl_weight=0.0001,
+        kl_clamp=2.0,
+        latent_dropout=0.05,
         norm_num_groups=32,
         **kwargs
     ):
@@ -22,6 +24,8 @@ class AudioVAEConfig(PretrainedConfig):
         self.latent_channels = latent_channels
         self.strides = strides
         self.kl_weight = kl_weight
+        self.kl_clamp = kl_clamp
+        self.latent_dropout = latent_dropout
         self.norm_num_groups = norm_num_groups
 
 class ResBlock(nn.Module):
@@ -54,7 +58,7 @@ class AcousticVAE(PreTrainedModel):
         encoder_layers = []
         current_channels = config.in_channels
         
-        # First convolution layer to increase dimension, no normalization to preserve original feature distribution
+        # First convolution layer to increase dimension
         encoder_layers.append(
             nn.Conv1d(config.in_channels, config.hidden_channels, 3, 1, 1)
         )
@@ -81,7 +85,7 @@ class AcousticVAE(PreTrainedModel):
         # Projection to Latent
         self.encoder = nn.Sequential(
             *encoder_layers,
-            nn.GroupNorm(config.norm_num_groups, config.hidden_channels, eps=1e-6), # 瓶颈处 Norm
+            nn.GroupNorm(config.norm_num_groups, config.hidden_channels, eps=1e-6), 
             nn.GELU(),
             nn.Conv1d(config.hidden_channels, config.latent_channels * 2, 3, 1, 1)
         )
@@ -114,7 +118,6 @@ class AcousticVAE(PreTrainedModel):
             )
             
         # Output Layer
-        # [Key] The last layer does not add Norm or activation function, keeping linear output to fit any value of Log-Mel
         self.decoder_net = nn.Sequential(*decoder_layers)
         self.final_proj = nn.Conv1d(config.hidden_channels, config.in_channels, 3, 1, 1)
 
@@ -127,7 +130,11 @@ class AcousticVAE(PreTrainedModel):
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
-            return mu + eps * std
+            z = mu + eps * std
+            
+            if self.config.latent_dropout > 0:
+                z = F.dropout(z, p=self.config.latent_dropout, training=True)
+            return z
         return mu 
 
     def decode(self, z):
@@ -154,10 +161,22 @@ class AcousticVAE(PreTrainedModel):
         if recon_mel.shape[2] != seq_len:
             recon_mel = recon_mel[:, :, :seq_len]
             
-        # 4. Loss
+        # 4. Loss with KL Clamping (Free Bits) [MODIFIED]
         rec_loss = F.mse_loss(recon_mel, mel)
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        kl_loss = kl_loss / (batch * seq_len) 
+        
+        # Calculate KL per element: 0.5 * (mu^2 + var - 1 - logvar)
+        # Shape: [Batch, LatentDim, Time]
+        kl_element = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
+        
+        # Sum over Latent Dimension (Dim 1) to get KL per timestep
+        # Shape: [Batch, Time]
+        kl_per_step = torch.sum(kl_element, dim=1)
+        
+        if self.config.kl_clamp > 0:
+            kl_per_step = torch.clamp(kl_per_step, min=self.config.kl_clamp)
+            
+        # Average over Batch and Time
+        kl_loss = kl_per_step.mean()
         
         total_loss = rec_loss + self.config.kl_weight * kl_loss
         

@@ -107,7 +107,7 @@ class CalmProjector(nn.Module):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = output_dim
-        
+        self.norm = nn.LayerNorm(input_dim)
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
@@ -115,7 +115,7 @@ class CalmProjector(nn.Module):
         )
         
     def forward(self, x):
-        return self.net(x)
+        return self.net(self.norm(x))
 
 # =============================================================================
 # Qwen-CALM Model Definition

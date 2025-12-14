@@ -10,269 +10,379 @@ from tqdm import tqdm
 from peft import PeftModel
 import editdistance as ed
 
-# 确保能导入项目根目录
 sys.path.append(os.getcwd())
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from models.modeling_gmm import QwenCALM, QwenCALMConfig, sample_from_gmm
-from models.modeling_vae import AcousticVAE
+from transformers import AutoTokenizer
+from models.modeling_gmm import QwenCALM, QwenCALMConfig
 
+
+# =============================================================================
+# 1. Utils
+# =============================================================================
+def sample_from_gmm(pi, mu, log_sigma):
+    dist_k = torch.distributions.Categorical(logits=pi)
+    k = dist_k.sample()  # [B, S]
+    k_expanded = k.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, mu.size(-1))
+    mu_k = torch.gather(mu, 2, k_expanded).squeeze(2)
+    log_sigma_k = torch.gather(log_sigma, 2, k_expanded).squeeze(2)
+    sigma_k = torch.exp(log_sigma_k)
+    z = torch.normal(mu_k, sigma_k)
+    return z
+
+
+def compute_wer(ref, hyp):
+    ref = re.sub(r"[^\w\s]", "", ref).lower().split()
+    hyp = re.sub(r"[^\w\s]", "", hyp).lower().split()
+    if len(ref) == 0:
+        return 1.0
+    return ed.eval(ref, hyp) / len(ref)
+
+
+def _get_single_token_id(tokenizer, s: str):
+    tid = tokenizer.convert_tokens_to_ids(s)
+    if tid is not None and tid != tokenizer.unk_token_id:
+        return tid
+    ids = tokenizer.encode(s, add_special_tokens=False)
+    return ids[-1] if len(ids) > 0 else None
+
+
+def _load_state_dict_any(path: str):
+    if os.path.exists(path):
+        return torch.load(path, map_location="cpu")
+    st_path = path.replace(".bin", ".safetensors")
+    if os.path.exists(st_path):
+        try:
+            from safetensors.torch import load_file
+            return load_file(st_path)
+        except Exception:
+            return None
+    return None
+
+
+def _try_load_part_from_adapter(module, adapter_sd: dict, part_name: str):
+    """
+    PEFT 保存的 modules_to_save 有时在 adapter 的 state_dict 里。
+    尝试从 adapter_sd 中抽取包含 `${part_name}.` 的权重，去掉前缀后 load。
+    """
+    if not isinstance(adapter_sd, dict):
+        return False
+
+    matched = {}
+    key_pat = f"{part_name}."
+    for k, v in adapter_sd.items():
+        if key_pat in k:
+            # 截掉 key_pat 之前的所有前缀，只保留 module 内部键
+            new_k = k.split(key_pat, 1)[1]
+            matched[new_k] = v
+
+    if not matched:
+        return False
+
+    missing, unexpected = module.load_state_dict(matched, strict=False)
+    # 只要加载到一些 key，就算成功
+    return len(matched) > 0
+
+
+# =============================================================================
+# 2. Load Model
+# =============================================================================
 def load_calm_model(args, device):
-    """
-    重组训练好的 Audio-CALM 模型
-    """
     print(f"Loading Base Qwen from {args.qwen_path}...")
+
     config = QwenCALMConfig(
         qwen_path=args.qwen_path,
         vae_path=args.vae_path,
-        num_mixtures=8
+        num_mixtures=args.num_mixtures,
+        latent_dim=args.latent_dim,
+        downsample_rate=args.latent_downsample,
+        use_precomputed_latents=False,  # eval: 需要 VAE 进行 encode/decode
     )
     model = QwenCALM(config)
-    
-    # 1. 加载 LoRA
-    if os.path.exists(os.path.join(args.checkpoint, "adapter_model.bin")):
+
+    # 1) Load LoRA (if exists)
+    if os.path.exists(os.path.join(args.checkpoint, "adapter_config.json")):
         print(f"Loading LoRA adapters from {args.checkpoint}...")
         model.llm = PeftModel.from_pretrained(model.llm, args.checkpoint)
-        model.llm = model.llm.merge_and_unload()
+        if args.merge_lora:
+            model.llm = model.llm.merge_and_unload()
     else:
-        print("No LoRA adapter found.")
+        print("No LoRA adapter found (Running pure base model?).")
 
-    # 2. 加载 Projector & Head
+    # 2) Load projector/head
     print("Loading Projector & Head weights...")
     input_proj_path = os.path.join(args.checkpoint, "input_proj.bin")
     output_head_path = os.path.join(args.checkpoint, "output_head.bin")
-    
+
+    loaded_proj = False
+    loaded_head = False
+
     if os.path.exists(input_proj_path):
         model.input_proj.load_state_dict(torch.load(input_proj_path, map_location="cpu"))
-    else:
-        print(f"Warning: {input_proj_path} not found! Projector is random!")
-
+        loaded_proj = True
     if os.path.exists(output_head_path):
         model.output_head.load_state_dict(torch.load(output_head_path, map_location="cpu"))
-    else:
-        print(f"Warning: {output_head_path} not found! Head is random!")
+        loaded_head = True
 
-    # 3. [关键修复] 精度管理
-    # LLM 部分使用 bf16/fp16
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model.llm.to(dtype)
-    model.input_proj.to(dtype)
-    model.output_head.to(dtype)
-    
-    # VAE 保持 float32 以确保音频生成的数值稳定性
-    model.vae.to(torch.float32)
+    # fallback: try read from adapter weights
+    if (not loaded_proj) or (not loaded_head):
+        adapter_sd = _load_state_dict_any(os.path.join(args.checkpoint, "adapter_model.bin"))
+        if adapter_sd is None:
+            adapter_sd = _load_state_dict_any(os.path.join(args.checkpoint, "adapter_model.safetensors"))
+
+        if adapter_sd is not None:
+            if not loaded_proj:
+                loaded_proj = _try_load_part_from_adapter(model.input_proj, adapter_sd, "input_proj")
+            if not loaded_head:
+                loaded_head = _try_load_part_from_adapter(model.output_head, adapter_sd, "output_head")
+
+    if not loaded_proj:
+        print("[WARN] input_proj not found! Projector may be random.")
+    if not loaded_head:
+        print("[WARN] output_head not found! Head may be random.")
+
+    # 3) dtype
+    llm_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    print(f"LLM dtype: {llm_dtype}")
+
+    model.llm.to(llm_dtype)
+    model.input_proj.to(llm_dtype)
+    model.output_head.to(llm_dtype)
+
+    # VAE 用 fp32
+    if hasattr(model, "vae"):
+        model.vae.to(torch.float32)
 
     model.to(device)
     model.eval()
     return model
 
+
+# =============================================================================
+# 3. Inference
+# =============================================================================
 def generate_audio_from_text(model, tokenizer, text, max_len=256, device="cuda"):
-    """
-    TTS 推理：文本 -> 音频 Latent
-    """
-    prompt = f"<|im_start|>user\nRead this: {text}<|im_end|>\n<|im_start|>assistant\n"
-    text_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    
+    prompt = f"<|im_start|>user\nRead this text:\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    text_ids = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+
     with torch.no_grad():
-        # 路径修复: transformer.wte
-        text_embeds = model.llm.transformer.wte(text_ids) 
-    
-    curr_inputs = text_embeds
+        curr_inputs = model.get_input_embeddings()(text_ids)
+
     generated_latents = []
     past_key_values = None
-    
+
     with torch.no_grad():
         for _ in range(max_len):
-            # Forward
-            outputs = model.llm.transformer(
-                inputs_embeds=curr_inputs, 
-                past_key_values=past_key_values, 
-                use_cache=True
+            outputs = model.llm(
+                inputs_embeds=curr_inputs,
+                past_key_values=past_key_values,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
             )
             past_key_values = outputs.past_key_values
-            
-            # 获取最后一个 token 的 hidden state
-            last_hidden = outputs.last_hidden_state[:, -1:, :] 
-            
-            # GMM 预测
+            last_hidden = outputs.hidden_states[-1][:, -1:, :]
+
             pi, mu, log_sigma = model.output_head(last_hidden)
-            
-            # 采样
-            z_next = sample_from_gmm(pi, mu, log_sigma) # [1, 1, 64]
+            z_next = sample_from_gmm(pi, mu, log_sigma)  # [1,1,D]
             generated_latents.append(z_next)
-            
-            # 下一步输入 (注意：input_proj 需要 bf16/fp16，z_next 可能是 float32)
-            z_next_casted = z_next.to(model.input_proj.weight.dtype)
+
+            z_next_casted = z_next.to(model.input_proj.net[0].weight.dtype)
             curr_inputs = model.input_proj(z_next_casted)
-            
-    latents = torch.cat(generated_latents, dim=1) # [1, T_gen, 64]
+
+    latents = torch.cat(generated_latents, dim=1)  # [1,T,D]
     return latents
 
-def transcribe_audio(model, tokenizer, mel, device="cuda"):
-    """
-    ASR 推理：音频 -> 文本
-    """
-    TARGET_LEN = 2048
-    if mel.shape[1] < TARGET_LEN:
-        mel = torch.nn.functional.pad(mel, (0, TARGET_LEN - mel.shape[1]))
-    mel = mel.to(device).unsqueeze(0).to(torch.float32) # VAE 需要 float32
-    
-    with torch.no_grad():
-        mu, _ = model.vae.encode(mel)
-        latents = mu.transpose(1, 2) # [1, T_lat, 64]
-        latents = latents.to(model.input_proj.weight.dtype)
-        audio_embeds = model.input_proj(latents)
-        
-    prompt = "<|im_start|>user\nTranscribe audio:<|im_end|>\n<|im_start|>assistant\n"
-    prompt_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    with torch.no_grad():
-        prompt_embeds = model.llm.transformer.wte(prompt_ids)
-        
-    inputs_embeds = torch.cat([audio_embeds, prompt_embeds], dim=1)
-    
-    B, T, _ = inputs_embeds.shape
-    dummy_ids = torch.full((B, T), tokenizer.pad_token_id, dtype=torch.long, device=device)
-    attention_mask = torch.ones((B, T), dtype=torch.long, device=device)
-    
-    eos_token_id = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
-
-    with torch.no_grad():
-        output_ids = model.llm.generate(
-            inputs_embeds=inputs_embeds,
-            input_ids=dummy_ids,       # 必须传
-            attention_mask=attention_mask, # 必须传
-            max_new_tokens=100,
-            do_sample=False, 
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=eos_token_id
-        )
-        
-    pred_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    return pred_text
-
 def mel_to_wav(vae, latents, device):
-    """Latent -> Mel -> Wav"""
-    # 确保 latents 是 float32 且形状正确
     latents = latents.to(torch.float32)
     if latents.shape[-1] == 64:
-        latents = latents.transpose(1, 2) # [1, 64, T]
-        
+        latents = latents.transpose(1, 2)  # [1,64,T]
     with torch.no_grad():
-        recon_mel = vae.decode(latents) # [1, 80, T]
-    
-    # 反归一化 (假设训练时用了 log)
-    mel = torch.exp(recon_mel) - 1e-5
-    
-    # [修复] Mel -> Linear Spectrogram -> Griffin-Lim
-    # 1. 定义逆 Mel 变换
-    inverse_mel_transform = torchaudio.transforms.InverseMelScale(
-        n_stft=1024 // 2 + 1,  # 513
-        n_mels=80,
-        sample_rate=16000,
-        f_min=0.0,
-        f_max=8000.0
-    ).to(device)
-    
-    # 2. 定义 Griffin-Lim
+        recon_mel = vae.decode(latents)  # [1,80,T]
+    mel = torch.exp(recon_mel)
+
     griffin_lim = torchaudio.transforms.GriffinLim(
-        n_fft=1024, 
-        hop_length=256, 
-        power=1.0 # 通常幅度谱用 1.0，能量谱用 2.0，这里 mel 还原回来通常是幅度近似
+        n_fft=1024,
+        hop_length=256,
+        power=2.0,
+        n_iter=32,
     ).to(device)
-    
-    # 3. 执行转换
+
     try:
-        linear_spec = inverse_mel_transform(mel)
-        wav = griffin_lim(linear_spec)
+        wav = griffin_lim(mel)
     except Exception as e:
-        print(f"Warning: Griffin-Lim failed: {e}")
-        wav = torch.zeros(1, 16000).to(device) # 返回静音防止崩溃
+        print(f"Griffin-Lim error: {e}")
+        wav = torch.zeros(1, 16000, device=device)
 
     return wav
 
-def compute_wer(ref, hyp):
-    # [优化] 去除标点并转小写
-    ref = re.sub(r'[^\w\s]', '', ref).lower().split()
-    hyp = re.sub(r'[^\w\s]', '', hyp).lower().split()
-    return ed.eval(ref, hyp) / len(ref) if len(ref) > 0 else 1.0
+
+def _get_single_token_id(tokenizer, s: str):
+    tid = tokenizer.convert_tokens_to_ids(s)
+    if tid is not None and tid != tokenizer.unk_token_id:
+        return tid
+    ids = tokenizer.encode(s, add_special_tokens=False)
+    return ids[-1] if len(ids) > 0 else None
+
+
+def transcribe_audio(model, tokenizer, latent, device="cuda", max_new_tokens=256, ablate_audio=False):
+    """
+    [FIX] 接收的是预计算的 latent（与训练一致），而不是 mel。
+    latent: [T, 64] 或 [64, T]
+    """
+    latent = latent.to(device).to(torch.float32)
+
+    # 统一 shape: [T, 64]
+    if latent.dim() == 2:
+        if latent.shape[0] == 64:
+            latent = latent.transpose(0, 1)
+    elif latent.dim() == 1:
+        latent = latent.unsqueeze(0)
+
+    latent = latent.unsqueeze(0)  # [1, T, 64]
+
+    # Cast to model dtype
+    proj_dtype = model.input_proj.net[0].weight.dtype
+    latent = latent.to(proj_dtype)
+
+    with torch.no_grad():
+        audio_embeds = model.input_proj(latent)
+
+    if ablate_audio:
+        audio_embeds = torch.zeros_like(audio_embeds)
+
+    prompt = "Transcribe the following audio:"
+    user_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    prompt_ids = tokenizer.encode(user_text, return_tensors="pt", add_special_tokens=False).to(device)
+    prompt_len = prompt_ids.shape[1]
+
+    with torch.no_grad():
+        prompt_embeds = model.get_input_embeddings()(prompt_ids)
+
+    inputs_embeds = torch.cat([audio_embeds, prompt_embeds], dim=1)
+    B, T, _ = inputs_embeds.shape
+    attention_mask = torch.ones((B, T), dtype=torch.long, device=device)
+
+    im_end_id = getattr(tokenizer, "im_end_id", None) or _get_single_token_id(tokenizer, "<|im_end|>")
+    eod_id = getattr(tokenizer, "eod_id", None)
+    eos_id = tokenizer.eos_token_id
+    eos_token_ids = [x for x in [im_end_id, eod_id, eos_id] if x is not None]
+
+    used_dummy = True
+    dummy_ids = torch.full((B, T), tokenizer.pad_token_id, dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        try:
+            output_ids = model.llm.generate(
+                input_ids=dummy_ids,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=eos_token_ids,
+                use_cache=True,
+            )
+        except Exception:
+            used_dummy = False
+            output_ids = model.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=eos_token_ids,
+                use_cache=True,
+            )
+
+    # [FIX] 根据分支决定切片起点
+    prefix_len = T if used_dummy else prompt_len
+    seq = output_ids[0]
+    if seq.numel() > prefix_len:
+        seq = seq[prefix_len:]
+    else:
+        seq = seq[-max_new_tokens:] if seq.numel() > max_new_tokens else seq
+
+    pred_text = tokenizer.decode(seq, skip_special_tokens=True).strip()
+    return pred_text
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--qwen_path", type=str, required=True)
     parser.add_argument("--vae_path", type=str, required=True)
-    parser.add_argument("--test_file", type=str, required=True)
+    parser.add_argument("--test_file", type=str, required=True, help="jsonl: {'text':..., 'latent_path':...}")
+
+    parser.add_argument("--task", type=str, default="asr", choices=["asr", "tts", "both"])
     parser.add_argument("--output_dir", type=str, default="eval_results")
     parser.add_argument("--max_samples", type=int, default=10)
+    parser.add_argument("--max_new_tokens_asr", type=int, default=256)
+    parser.add_argument("--max_tts_len", type=int, default=256)
+    parser.add_argument("--merge_lora", action="store_true")
+    parser.add_argument("--ablate_audio", action="store_true", help="Zero out audio for diagnosis")
+
+    parser.add_argument("--num_mixtures", type=int, default=8)
+    parser.add_argument("--latent_dim", type=int, default=64)
+    parser.add_argument("--latent_downsample", type=int, default=4)
+
     args = parser.parse_args()
-    
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     tokenizer = AutoTokenizer.from_pretrained(args.qwen_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None: tokenizer.pad_token_id = tokenizer.eod_id
-    
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = getattr(tokenizer, "eod_id", None) or tokenizer.eos_token_id
+    if not hasattr(tokenizer, "im_end_id") or tokenizer.im_end_id is None:
+        tokenizer.im_end_id = _get_single_token_id(tokenizer, "<|im_end|>")
+
     model = load_calm_model(args, device)
-    
+
     data = []
-    with open(args.test_file, 'r') as f:
+    with open(args.test_file, "r") as f:
         for line in f:
-            data.append(json.loads(line))
-    
-    import random
-    random.shuffle(data)
-    data = data[:args.max_samples]
-    
-    print(f"Starting Evaluation on {len(data)} samples...")
-    
+            try:
+                data.append(json.loads(line))
+            except Exception:
+                pass
+
+    if len(data) > args.max_samples:
+        import random
+        random.shuffle(data)
+        data = data[:args.max_samples]
+
+    print(f"Starting Evaluation: task={args.task}, samples={len(data)}")
+
     asr_wers = []
-    tts_sims = []
-    
+
     for i, item in enumerate(tqdm(data)):
-        text_gt = item['text']
-        # 加载 Mel 并转为 float32 (VAE 需要)
-        mel_gt = torch.load(item['mel_path']).to(device).to(torch.float32)
-        
-        # === Task 1: TTS Eval ===
-        vae_stride = getattr(model.vae, "total_stride", 16)
-        target_len = mel_gt.shape[1] // vae_stride
-        if target_len < 10:
-            target_len = 50
-        
-        gen_latents = generate_audio_from_text(model, tokenizer, text_gt, max_len=target_len, device=device)
-        
-        wav_gen = mel_to_wav(model.vae, gen_latents, device)
-        torchaudio.save(os.path.join(args.output_dir, f"sample_{i}_gen.wav"), wav_gen.cpu(), 16000)
-        
-        # Cosine Sim
-        with torch.no_grad():
-            mu_gt, _ = model.vae.encode(mel_gt.unsqueeze(0))
-            gt_latents = mu_gt.transpose(1, 2)
-            
-        min_l = min(gen_latents.shape[1], gt_latents.shape[1])
-        # 确保计算 Sim 时类型一致
-        cos_sim = torch.nn.functional.cosine_similarity(
-            gen_latents[:, :min_l, :].to(torch.float32).reshape(1, -1),
-            gt_latents[:, :min_l, :].to(torch.float32).reshape(1, -1),
-            dim=1
-        ).item()
-        tts_sims.append(cos_sim)
-        
-        # === Task 2: ASR Eval ===
-        pred_text = transcribe_audio(model, tokenizer, mel_gt, device=device)
-        wer = compute_wer(text_gt, pred_text)
-        asr_wers.append(wer)
-        
-        with open(os.path.join(args.output_dir, "log.txt"), "a") as f:
-            f.write(f"Sample {i}:\n")
-            f.write(f"  GT Text: {text_gt}\n")
-            f.write(f"  Pred Text: {pred_text} (WER: {wer:.2f})\n")
-            f.write(f"  TTS CosSim: {cos_sim:.4f}\n\n")
+        text_gt = item.get("text", "") or ""
+        latent_path = item.get("latent_path", "") or ""
 
-    print("="*30)
-    print(f"Average WER (ASR): {np.mean(asr_wers):.4f}")
-    print(f"Average CosSim (TTS): {np.mean(tts_sims):.4f}")
-    print(f"Samples saved to {args.output_dir}")
+        if args.task in ("asr", "both"):
+            if not latent_path or not os.path.exists(latent_path):
+                print(f"[Sample {i}] ASR skipped (no latent)")
+                continue
 
-if __name__ == "__main__":
-    main()
+            # [FIX] 读取预计算 latent，与训练一致
+            payload = torch.load(latent_path, map_location="cpu")
+            if isinstance(payload, dict):
+                latent = payload["latent"]
+            else:
+                latent = payload
+
+            pred_text = transcribe_audio(
+                model, tokenizer, latent, device=device,
+                max_new_tokens=args.max_new_tokens_asr,
+                ablate_audio=args.ablate_audio
+            )
+
+            wer = compute_wer(text_gt, pred_text) if text_gt else 1.0
+            asr_wers.append(wer)
+
+            print(f"[{i}] GT: {text_gt[:60]}...")
+            print(f"[{i}] PR: {pred_text[:60]}...")
+            print(f"[{i}] WER: {wer:.4f}")
+
+    if asr_wers:
+        print(f"\nAverage WER: {float(np.mean(asr_wers)):.6f}")
