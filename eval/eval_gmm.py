@@ -14,6 +14,8 @@ sys.path.append(os.getcwd())
 
 from transformers import AutoTokenizer
 from models.modeling_gmm import QwenCALM, QwenCALMConfig
+from transformers.models.whisper.english_normalizer import BasicTextNormalizer
+normalizer = BasicTextNormalizer()
 
 
 # =============================================================================
@@ -31,11 +33,13 @@ def sample_from_gmm(pi, mu, log_sigma):
 
 
 def compute_wer(ref, hyp):
+    ref_norm = normalizer(ref)
+    hyp_norm = normalizer(hyp)
     ref = re.sub(r"[^\w\s]", "", ref).lower().split()
     hyp = re.sub(r"[^\w\s]", "", hyp).lower().split()
     if len(ref) == 0:
         return 1.0
-    return ed.eval(ref, hyp) / len(ref)
+    return ed.eval(ref_norm.split(), hyp_norm.split()) / len(ref_norm.split())
 
 
 def _get_single_token_id(tokenizer, s: str):
@@ -71,7 +75,6 @@ def _try_load_part_from_adapter(module, adapter_sd: dict, part_name: str):
     key_pat = f"{part_name}."
     for k, v in adapter_sd.items():
         if key_pat in k:
-            # 截掉 key_pat 之前的所有前缀，只保留 module 内部键
             new_k = k.split(key_pat, 1)[1]
             matched[new_k] = v
 
@@ -315,7 +318,7 @@ def main():
 
     parser.add_argument("--task", type=str, default="asr", choices=["asr", "tts", "both"])
     parser.add_argument("--output_dir", type=str, default="eval_results")
-    parser.add_argument("--max_samples", type=int, default=10)
+    parser.add_argument("--max_samples", type=int, default=-1, help="Number of samples to evaluate. -1 for all.")
     parser.add_argument("--max_new_tokens_asr", type=int, default=256)
     parser.add_argument("--max_tts_len", type=int, default=256)
     parser.add_argument("--merge_lora", action="store_true")
@@ -346,10 +349,13 @@ def main():
             except Exception:
                 pass
 
-    if len(data) > args.max_samples:
+    if args.max_samples > 0 and len(data) > args.max_samples:
+        print(f"Sampling {args.max_samples} from {len(data)} total samples.")
         import random
         random.shuffle(data)
         data = data[:args.max_samples]
+    else:
+        print(f"Evaluating on FULL dataset: {len(data)} samples.")
 
     print(f"Starting Evaluation: task={args.task}, samples={len(data)}")
 
@@ -364,7 +370,6 @@ def main():
                 print(f"[Sample {i}] ASR skipped (no latent)")
                 continue
 
-            # [FIX] 读取预计算 latent，与训练一致
             payload = torch.load(latent_path, map_location="cpu")
             if isinstance(payload, dict):
                 latent = payload["latent"]
@@ -380,9 +385,13 @@ def main():
             wer = compute_wer(text_gt, pred_text) if text_gt else 1.0
             asr_wers.append(wer)
 
-            print(f"[{i}] GT: {text_gt[:60]}...")
-            print(f"[{i}] PR: {pred_text[:60]}...")
-            print(f"[{i}] WER: {wer:.4f}")
+            if i % 10 == 0:
+                print(f"[{i}] GT: {text_gt[:60]}...")
+                print(f"[{i}] PR: {pred_text[:60]}...")
+                print(f"[{i}] WER: {wer:.4f}")
 
     if asr_wers:
         print(f"\nAverage WER: {float(np.mean(asr_wers)):.6f}")
+
+if __name__ == "__main__":
+    main()
