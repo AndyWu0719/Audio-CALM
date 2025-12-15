@@ -244,7 +244,7 @@ def transcribe_audio(model, tokenizer, latent, device="cuda", max_new_tokens=256
     latent = latent.unsqueeze(0)  # [1, T, 64]
 
     # Cast to model dtype
-    proj_dtype = model.input_proj.net[0].weight.dtype
+    proj_dtype = model.input_proj.pre.weight.dtype
     latent = latent.to(proj_dtype)
 
     with torch.no_grad():

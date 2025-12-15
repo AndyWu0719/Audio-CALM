@@ -21,6 +21,14 @@ import warnings
 warnings.filterwarnings("ignore", module="torchvision")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*barrier().*")
+try:
+    import deepspeed
+    from deepspeed.runtime.fp16.loss_scaler import LossScaler
+    torch.serialization.add_safe_globals([LossScaler])
+except ImportError:
+    pass
+except AttributeError:
+    pass
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True

@@ -28,7 +28,7 @@ LATENT_DIM=64
 
 LR_TAG=${LR//./p}
 
-RUN_NAME="${LATENT_DOWN}-mix${NUM_MIX}-dim${LATENT_DIM}-${LR_TAG}"
+RUN_NAME="${LATENT_DOWN}-mix${NUM_MIX}-dim${LATENT_DIM}-${LR_TAG}-1"
 OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_gmm"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/${RUN_NAME}"
 
@@ -66,7 +66,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_gmm.py \
     --lr_scheduler_type "cosine" \
     --warmup_ratio 0.03 \
     --max_grad_norm 1.0 \
-    --num_train_epochs 3 \
+    --num_train_epochs 5 \
     --optim "adamw_torch" \
     \
     --use_lora True \
