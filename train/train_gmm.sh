@@ -70,7 +70,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_gmm.py \
     --lr_scheduler_type "cosine" \
     --warmup_ratio 0.03 \
     --max_grad_norm 1.0 \
-    --num_train_epochs 10 \
+    --num_train_epochs 5 \
     --optim "adamw_torch" \
     \
     --use_lora True \
