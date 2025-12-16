@@ -45,6 +45,7 @@ class ModelArguments:
     num_mixtures: int = field(default=8, metadata={"help": "Number of Gaussian Mixtures for MDN Head"})
     latent_dim: int = field(default=64, metadata={"help": "Dimension of VAE Latents"})
     audio_loss_weight: float = field(default=1.0, metadata={"help": "Weight for GMM Loss"})
+    freeze_projector: bool = field(default=False, metadata={"help": "Whether to freeze the input projector"})
 
 @dataclass
 class DataArguments:
@@ -393,8 +394,19 @@ def main():
         print(f"Total Trainable Params: {total_trainable}")
     
     # Ensure Projector/Head are trainable
-    for p in model.input_proj.parameters(): p.requires_grad = True
-    for p in model.output_head.parameters(): p.requires_grad = True
+    if model_args.freeze_projector:
+        if torch.distributed.get_rank() == 0:
+            print("❄️  Freezing Audio Input Projector (using pretrained ASR alignment)...")
+        for p in model.input_proj.parameters(): 
+            p.requires_grad = False
+    else:
+        if torch.distributed.get_rank() == 0:
+            print("🔥 Audio Input Projector is TRAINABLE.")
+        for p in model.input_proj.parameters(): 
+            p.requires_grad = True
+
+    for p in model.output_head.parameters(): 
+        p.requires_grad = True
 
     # 4. Data
     train_dataset = CalmDataset(

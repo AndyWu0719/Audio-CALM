@@ -1,4 +1,5 @@
 #!/bin/bash
+# TTS
 export OMP_NUM_THREADS=8
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_ALLOC_CONF=max_split_size_mb:128
@@ -7,7 +8,9 @@ MASTER_PORT=29505
 
 WORK_PATH=$(pwd)
 QWEN_PATH="${WORK_PATH}/qwen2_7B_Instruct" 
-VAE_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_4x_kl_annealing/checkpoint-109900" 
+VAE_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_4x_kl_annealing_l1_ssim/checkpoint-6900" 
+
+ASR_CHECKPOINT="${WORK_PATH}/outputs/checkpoints/calm_latent_gmm/4-mix8-dim64-1e-4-1/checkpoint-10990"
 
 TRAIN_DATA_DIR="${WORK_PATH}/data/latents/train"
 EVAL_DATA_DIR="${WORK_PATH}/data/latents/dev"
@@ -28,7 +31,7 @@ LATENT_DIM=64
 
 LR_TAG=${LR//./p}
 
-RUN_NAME="${LATENT_DOWN}-mix${NUM_MIX}-dim${LATENT_DIM}-${LR_TAG}-1"
+RUN_NAME="tts_${LATENT_DOWN}-mix${NUM_MIX}-dim${LATENT_DIM}-${LR_TAG}-1"
 OUTPUT_DIR_BASE="${WORK_PATH}/outputs/checkpoints/calm_latent_gmm"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/${RUN_NAME}"
 
@@ -42,7 +45,7 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_gmm.py \
     --run_name "$RUN_NAME" \
     --output_dir "$OUTPUT_DIR" \
     --report_to "tensorboard" \
-    --task_mode asr \
+    --task_mode tts \
     \
     --num_mixtures $NUM_MIX \
     --latent_dim $LATENT_DIM \
@@ -62,11 +65,12 @@ torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_gmm.py \
     --per_device_train_batch_size $PER_DEVICE_BATCH_SIZE \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps $GRAD_ACCUM \
+    --freeze_projector True \
     --learning_rate $LR \
     --lr_scheduler_type "cosine" \
     --warmup_ratio 0.03 \
     --max_grad_norm 1.0 \
-    --num_train_epochs 5 \
+    --num_train_epochs 10 \
     --optim "adamw_torch" \
     \
     --use_lora True \

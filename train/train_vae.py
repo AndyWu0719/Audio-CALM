@@ -108,7 +108,8 @@ class VAETrainer(Trainer):
         if self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 0:
             self.log({
                 "train/rec_loss": outputs["rec_loss"].item(),
-                "train/kl_loss": outputs["kl_loss"].item()
+                "train/kl_loss": outputs["kl_loss"].item(),
+                "train/ssim_loss": outputs["ssim_loss"].item()
             })
             
         total_loss = rec_loss + current_weight * kl_loss

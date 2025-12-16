@@ -13,8 +13,11 @@ import math
 class AudioInputProjector(nn.Module):
     def __init__(self, latent_dim, llm_dim, max_audio_len=1024):
         super().__init__()
-        # [IMPROVED] 更深的投影 + 残差
-        self.pre = nn.Linear(latent_dim, llm_dim)
+        self.conv_block = nn.Sequential(
+            nn.Conv1d(latent_dim, llm_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(llm_dim, llm_dim, kernel_size=3, padding=1),
+        )
         self.blocks = nn.ModuleList([
             nn.Sequential(
                 nn.LayerNorm(llm_dim, eps=1e-6),
@@ -25,7 +28,6 @@ class AudioInputProjector(nn.Module):
         ])
         self.post_norm = nn.LayerNorm(llm_dim, eps=1e-6)
         
-        # [NEW] Learnable audio position embedding
         self.pos_emb = nn.Embedding(max_audio_len, llm_dim)
         self.max_audio_len = max_audio_len
 
@@ -34,18 +36,18 @@ class AudioInputProjector(nn.Module):
         B, T, _ = x.shape
         device = x.device
         
-        # 基础投影 + 残差块
-        x = self.pre(x)
+        x = x.transpose(1, 2)
+        x = self.conv_block(x)
+        x = x.transpose(1, 2)
+        
         for block in self.blocks:
             x = x + block(x)
         x = self.post_norm(x)
         
-        # 加位置编码
         T_clamped = min(T, self.max_audio_len)
         pos_ids = torch.arange(T_clamped, device=device).unsqueeze(0).expand(B, -1)
         
         if T > self.max_audio_len:
-            # 超长音频：前面加位置编码，后面不加
             pos_emb_full = torch.zeros(B, T, x.size(-1), device=device, dtype=x.dtype)
             pos_emb_full[:, :T_clamped, :] = self.pos_emb(pos_ids)
             return x + pos_emb_full
@@ -204,7 +206,7 @@ class QwenCALM(PreTrainedModel):
         else:
             audio_mask = torch.ones((B_aud, T_aud), device=device, dtype=torch.long)
             
-        gt_latents = gt_latents.to(dtype=self.input_proj.pre.weight.dtype)
+        gt_latents = gt_latents.to(dtype=self.llm.dtype)
         audio_embeds = self.input_proj(gt_latents)
         text_embeds = self.get_input_embeddings()(text_input_ids)
 
