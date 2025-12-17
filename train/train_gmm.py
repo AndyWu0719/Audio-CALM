@@ -1,136 +1,145 @@
+"""
+GMM joint training script for Audio-CALM (supports mix / tts / asr modes).
+Refactored for clarity: English comments, sections, small robustness fixes.
+"""
+
 import os
 import sys
-import torch
-import random
-from dataclasses import dataclass, field
-import torch.distributed as dist
-from typing import List, Dict, Any
-from glob import glob
 import math
-
-sys.path.append(os.getcwd())
-
-from torch.utils.data import Dataset
-from transformers import Trainer, TrainingArguments, HfArgumentParser, set_seed, AutoTokenizer
-from torch.optim import AdamW
-from models.modeling_gmm import QwenCALM, QwenCALMConfig 
-from peft import LoraConfig, get_peft_model, TaskType
-from functools import partial
-
+import random
 import warnings
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
+
+from glob import glob
+
+import torch
+import torch.distributed as dist
+from torch.utils.data import Dataset
+from transformers import Trainer, TrainingArguments, set_seed, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
+
+# project imports
+sys.path.append(os.getcwd())
+from models.modeling_gmm import QwenCALM, QwenCALMConfig
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from rich.console import Console
+from rich.traceback import install
+
+install(show_locals=False)
+console = Console()
 warnings.filterwarnings("ignore", module="torchvision")
 warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*barrier().*")
+
+# DeepSpeed compatibility (keep as-is)
 try:
     import deepspeed
     from deepspeed.runtime.fp16.loss_scaler import LossScaler
     torch.serialization.add_safe_globals([LossScaler])
-except ImportError:
-    pass
-except AttributeError:
+except (ImportError, AttributeError):
     pass
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-@dataclass
-class ModelArguments:
-    qwen_path: str = field(metadata={"help": "Path to Qwen2-7B-Instruct folder"})
-    vae_path: str = field(metadata={"help": "Path to trained VAE checkpoint folder"})
-    use_lora: bool = field(default=True, metadata={"help": "Whether to use LoRA"})
-    lora_rank: int = field(default=64, metadata={"help": "LoRA Rank"})
-    lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
-    lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
-    use_precomputed_latents: bool = field(default=False, metadata={"help": "Set True if using latent .pt files"})
-    num_mixtures: int = field(default=8, metadata={"help": "Number of Gaussian Mixtures for MDN Head"})
-    latent_dim: int = field(default=64, metadata={"help": "Dimension of VAE Latents"})
-    audio_loss_weight: float = field(default=1.0, metadata={"help": "Weight for GMM Loss"})
-    freeze_projector: bool = field(default=False, metadata={"help": "Whether to freeze the input projector"})
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def _get_rank_safe() -> int:
+    """Return process rank or 0 when not running distributed."""
+    try:
+        return dist.get_rank()
+    except Exception:
+        return 0
 
-@dataclass
-class DataArguments:
-    librispeech_root: str = field(metadata={"help": "Path to original LibriSpeech dataset root"})
-    mel_dir: str = field(metadata={"help": "Path to data directory (Mel .pt or Latent .pt)"})
-    eval_mel_dir: str = field(default=None, metadata={"help": "Path to EVAL data directory"})
-    train_subsets: str = field(default="train-clean-100,train-clean-360,train-other-500", metadata={"help": "Training subsets"})
-    eval_subsets: str = field(default="dev-clean", metadata={"help": "Eval subsets"})
-    max_text_len: int = field(default=512, metadata={"help": "Max text sequence length"})
-    max_audio_len: int = field(default=512, metadata={"help": "Max audio latent sequence length"})
-    latent_downsample: int = field(default=16, metadata={"help": "Downsample rate of the VAE (e.g. 4 or 16)"})
-    task_mode: str = field(default="mix", metadata={"help": "mix | tts | asr"})
-    task_prob_tts: float = field(default=0.5, metadata={"help": "Probability of sampling TTS in mix mode"})
-
-# =============================================================================
-# 1. Improved Dataset (Smart Truncation + Exception Filtering)
-# =============================================================================
+# ---------------------------------------------------------------------
+# Dataset (supports mix / tts / asr)
+# ---------------------------------------------------------------------
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=512, max_audio_len=512, 
-                 use_latents=False, task_mode="mix", task_prob_tts=0.5):
+    """
+    Dataset that pairs pretrained latent/mel files with LibriSpeech transcripts.
+    Each item selects a task mode: 'tts', 'asr', or mix (random choice).
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        librispeech_root: str,
+        subsets: str,
+        tokenizer,
+        max_text_len: int = 512,
+        max_audio_len: int = 512,
+        use_latents: bool = False,
+        task_mode: str = "mix",
+        task_prob_tts: float = 0.5,
+    ):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
         self.use_latents = use_latents
         self.task_mode = task_mode
         self.task_prob_tts = task_prob_tts
-        
+
         self.im_end_id = getattr(tokenizer, "im_end_id", None)
         if self.im_end_id is None:
             ids = tokenizer.encode("<|im_end|>", add_special_tokens=False)
             self.im_end_id = ids[-1] if len(ids) > 0 else tokenizer.eos_token_id
 
-        self.data = []
+        self.data: List[Dict[str, str]] = []
         subset_list = subsets.split(",")
-        if torch.distributed.get_rank() == 0:
-            print(f"Scanning pairs in {subset_list}...")
 
-        # 1. Build Index
-        file_index = {}
-        for subset in subset_list:
-            subset_dir = os.path.join(data_dir, subset.strip())
-            if not os.path.exists(subset_dir): continue
-            
-            # Recursive scan
-            files = glob(os.path.join(subset_dir, "**", "*.pt"), recursive=True)
-            for f in files:
-                key = os.path.splitext(os.path.basename(f))[0]
-                file_index[key] = f
-        
-        # 2. Match Transcripts
+        if _get_rank_safe() == 0:
+            console.log(f"[green]Scanning subsets: {subset_list}[/green]")
+
+        # Build index of available .pt data files
+        file_index: Dict[str, str] = {}
+        search_path = os.path.join(data_dir, "**", "*.pt")
+        files = glob(search_path, recursive=True)
+        for f in files:
+            key = os.path.splitext(os.path.basename(f))[0]
+            file_index[key] = f
+
+        # Match transcripts in LibriSpeech subsets
         matched_count = 0
         for subset in subset_list:
             subset_dir = os.path.join(librispeech_root, subset.strip())
-            if not os.path.exists(subset_dir): continue
+            if not os.path.exists(subset_dir):
+                continue
 
-            for root, dirs, files in os.walk(subset_dir):
-                for file in files:
+            for root, dirs, txt_files in os.walk(subset_dir):
+                for file in txt_files:
                     if file.endswith(".trans.txt"):
                         try:
-                            with open(os.path.join(root, file), "r") as f:
-                                for line in f:
+                            with open(os.path.join(root, file), "r") as fh:
+                                for line in fh:
                                     parts = line.strip().split(" ", 1)
-                                    if len(parts) != 2: continue
+                                    if len(parts) != 2:
+                                        continue
                                     file_id, text = parts
-
                                     if file_id in file_index:
-                                        self.data.append({
-                                            "text": text,
-                                            "file_path": file_index[file_id]
-                                        })
+                                        self.data.append({"text": text, "file_path": file_index[file_id]})
                                         matched_count += 1
                         except Exception:
                             continue
-        if torch.distributed.get_rank() == 0:
-            print(f"Total matched pairs: {matched_count}")
 
-    def __len__(self):
+        if _get_rank_safe() == 0:
+            console.log(f"[green]Total matched pairs: {matched_count}[/green]")
+
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """
+        Returns:
+            A dict containing 'text_ids', 'labels', 'audio_features', 'task_mode', '_valid'.
+        """
         try:
             item = self.data[idx]
-            text_content = item['text']
+            text_content = item["text"]
 
-            # Determine Task Mode
+            # Choose task mode dynamically based on config
             if self.task_mode == "tts":
                 current_mode = "tts"
             elif self.task_mode == "asr":
@@ -138,78 +147,74 @@ class CalmDataset(Dataset):
             else:
                 current_mode = "tts" if random.random() < self.task_prob_tts else "asr"
 
-            payload = torch.load(item['file_path'], map_location="cpu")
+            payload = torch.load(item["file_path"], map_location="cpu")
             if isinstance(payload, dict):
-                audio = payload["latent"]
+                audio = payload.get("latent", payload.get("mel", None))
             else:
                 audio = payload
 
-            # audio: [64, T] or [T, 64]，统一处理
-            if audio.dim() == 2:
-                # 假设预处理保存的是 [64, T]，需要 transpose
-                if audio.shape[0] == 64:
-                    audio = audio.transpose(0, 1)  # -> [T, 64]
+            if audio is None:
+                return {"_valid": False}
+
+            target_dim = 64  # expected latent dim
+            # Fix shape: accept (T, D) or (D, T) forms
+            if audio.shape[0] == target_dim and audio.shape[1] != target_dim:
+                audio = audio.transpose(0, 1)
+            elif audio.shape[1] == target_dim:
+                pass
+            else:
+                return {"_valid": False}
+
+            if audio.shape[1] != target_dim:
+                return {"_valid": False}
 
             T = audio.shape[0]
 
-            # ================== [FIX] ASR 不允许随机裁剪 ==================
+            # Truncate long audio for TTS only (ASR requires full audio)
             if T > self.max_audio_len:
                 if current_mode == "asr":
-                    # 丢弃超长样本，避免音频与 transcript 不对齐
                     return {"_valid": False}
                 else:
-                    # TTS 可以随机裁剪
                     start = torch.randint(0, T - self.max_audio_len, (1,)).item()
-                    audio = audio[start:start + self.max_audio_len, :]
+                    audio = audio[start : start + self.max_audio_len, :]
 
-            # ================== Build Prompt ==================
+            # Build prompt and tokenization
             if current_mode == "tts":
-                messages = [{"role": "user", "content": f"Read this text:\n{text_content}"}]
+                prompt = f"Read this text:\n{text_content}"
             else:
-                messages = [
-                    {"role": "user", "content": "Transcribe the following audio:"},
-                    {"role": "assistant", "content": text_content}
-                ]
+                prompt = "Transcribe the following audio:"
 
-            user_text = f"<|im_start|>user\n{messages[0]['content']}<|im_end|>\n<|im_start|>assistant\n"
+            user_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
             user_ids = self.tokenizer.encode(user_text, add_special_tokens=False)
 
             if current_mode == "tts":
                 text_ids = user_ids
                 labels = [-100] * len(text_ids)
             else:
-                target_text = f"{messages[1]['content']}<|im_end|>"
+                target_text = f"{text_content}<|im_end|>"
                 target_ids = self.tokenizer.encode(target_text, add_special_tokens=False)
-
-                # [FIX] 截断时保留 im_end
-                max_target_len = max(1, self.max_text_len - len(user_ids))
-                if len(target_ids) > max_target_len:
-                    target_ids = target_ids[:max_target_len]
-                    if self.im_end_id is not None:
-                        target_ids[-1] = self.im_end_id
-
                 text_ids = user_ids + target_ids
                 labels = [-100] * len(user_ids) + target_ids
 
-            # 最终保险
+            # enforce max text length
             if len(text_ids) > self.max_text_len:
-                text_ids = text_ids[:self.max_text_len]
-                labels = labels[:self.max_text_len]
+                text_ids = text_ids[: self.max_text_len]
+                labels = labels[: self.max_text_len]
 
             return {
                 "text_ids": torch.tensor(text_ids, dtype=torch.long),
                 "labels": torch.tensor(labels, dtype=torch.long),
-                "audio_features": audio, 
+                "audio_features": audio,
                 "task_mode": current_mode,
-                "_valid": True
+                "_valid": True,
             }
 
-        except Exception as e:
+        except Exception:
             return {"_valid": False}
 
-# =============================================================================
-# 2. Dynamic Data Collator (With Filtering)
-# =============================================================================
+# ---------------------------------------------------------------------
+# Data collator
+# ---------------------------------------------------------------------
 @dataclass
 class CalmCollator:
     pad_token_id: int
@@ -217,38 +222,29 @@ class CalmCollator:
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         valid_features = [f for f in features if f.get("_valid", False)]
-        
         if not valid_features:
-            dummy = {
-                "text_ids": torch.tensor([self.pad_token_id] * 2, dtype=torch.long),
-                "labels": torch.tensor([-100] * 2, dtype=torch.long),
-                "audio_features": torch.zeros(2, 64),
-                "task_mode": "asr",
-                "_valid": True,
+            # return a minimal dummy batch to avoid crashes
+            return {
+                "text_input_ids": torch.tensor([[self.pad_token_id]], dtype=torch.long),
+                "attention_mask": torch.tensor([[0]], dtype=torch.long),
+                "labels": torch.tensor([[-100]], dtype=torch.long),
+                "audio_features": torch.zeros(1, 1, 64),
+                "audio_lens": torch.tensor([1], dtype=torch.long),
+                "task_modes": ["tts"],
             }
-            valid_features = [dummy]
 
-        # 2. Text Padding (Right Padding)
         text_ids = [f["text_ids"] for f in valid_features]
         labels = [f["labels"] for f in valid_features]
-        
-        padded_input_ids = torch.nn.utils.rnn.pad_sequence(
-            text_ids, batch_first=True, padding_value=self.pad_token_id
-        )
-        padded_labels = torch.nn.utils.rnn.pad_sequence(
-            labels, batch_first=True, padding_value=-100
-        )
+
+        padded_input_ids = torch.nn.utils.rnn.pad_sequence(text_ids, batch_first=True, padding_value=self.pad_token_id)
+        padded_labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
         attention_mask = (padded_input_ids != self.pad_token_id).long()
 
-        # 3. Audio Padding (Dynamic)
-        audio_feats = [f["audio_features"] for f in valid_features] 
+        audio_feats = [f["audio_features"] for f in valid_features]
         audio_lens = torch.tensor([f.shape[0] for f in audio_feats], dtype=torch.long)
-        
-        padded_audio = torch.nn.utils.rnn.pad_sequence(
-            audio_feats, batch_first=True, padding_value=self.audio_pad_val
-        )
-        # [B, T, D] -> [B, D, T] (Model Expectation)
-        padded_audio = padded_audio.transpose(1, 2) 
+
+        padded_audio = torch.nn.utils.rnn.pad_sequence(audio_feats, batch_first=True, padding_value=self.audio_pad_val)
+        padded_audio = padded_audio.transpose(1, 2)  # [B, D, T]
 
         task_modes = [f["task_mode"] for f in valid_features]
 
@@ -256,14 +252,14 @@ class CalmCollator:
             "text_input_ids": padded_input_ids,
             "attention_mask": attention_mask,
             "labels": padded_labels,
-            "audio_features": padded_audio, 
+            "audio_features": padded_audio,
             "audio_lens": audio_lens,
-            "task_modes": task_modes
+            "task_modes": task_modes,
         }
 
-# =============================================================================
-# 3. Custom Trainer
-# =============================================================================
+# ---------------------------------------------------------------------
+# Custom Trainer (tracks per-task loss)
+# ---------------------------------------------------------------------
 class CalmTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -276,7 +272,7 @@ class CalmTrainer(Trainer):
             attention_mask=inputs["attention_mask"],
             audio_lens=inputs["audio_lens"],
             labels=inputs["labels"],
-            task_modes=inputs["task_modes"]
+            task_modes=inputs["task_modes"],
         )
         loss = outputs["loss"]
 
@@ -284,10 +280,10 @@ class CalmTrainer(Trainer):
             task_modes = inputs.get("task_modes", [])
             loss_tts = outputs.get("loss_tts", torch.tensor(0.0)).detach()
             loss_asr = outputs.get("loss_asr", torch.tensor(0.0)).detach()
-            
+
             num_tts = task_modes.count("tts")
             num_asr = task_modes.count("asr")
-            
+
             self.loss_meters["tts"] += loss_tts.item() * num_tts
             self.loss_meters["asr"] += loss_asr.item() * num_asr
             self.loss_meters["tts_cnt"] += num_tts
@@ -298,140 +294,148 @@ class CalmTrainer(Trainer):
     def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
         tts_cnt = max(self.loss_meters["tts_cnt"], 1)
         asr_cnt = max(self.loss_meters["asr_cnt"], 1)
-        
         logs["loss_tts"] = round(self.loss_meters["tts"] / tts_cnt, 4)
         logs["loss_asr"] = round(self.loss_meters["asr"] / asr_cnt, 4)
-
         self.loss_meters = {"tts": 0.0, "asr": 0.0, "tts_cnt": 0, "asr_cnt": 0}
-        
         super().log(logs, *args, **kwargs)
 
-    def create_optimizer(self):
-        if self.optimizer is None:
-            decay_params, no_decay_params = [], []
-            projector_params = []
-            
-            head_keywords = ["input_proj", "output_head"]
+# ---------------------------------------------------------------------
+# Main execution
+# ---------------------------------------------------------------------
+@hydra.main(version_base=None, config_path="../config", config_name="gmm_config")
+def main(cfg: DictConfig):
+    console.rule("[magenta]GMM Joint Training (Unified Strategy)[/magenta]")
 
-            for name, param in self.model.named_parameters():
-                if not param.requires_grad: continue
+    set_seed(cfg.training.seed)
+    training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
 
-                if any(k in name for k in head_keywords):
-                    projector_params.append(param)
-                else:
-                    if "bias" in name or "LayerNorm" in name or "layernorm" in name:
-                        no_decay_params.append(param)
-                    else:
-                        decay_params.append(param)
-
-            opt_grouped_params = [
-                {
-                    "params": decay_params,
-                    "weight_decay": self.args.weight_decay,
-                    "lr": self.args.learning_rate, 
-                },
-                {
-                    "params": no_decay_params,
-                    "weight_decay": 0.0,
-                    "lr": self.args.learning_rate,
-                },
-                {
-                    "params": projector_params,
-                    "weight_decay": self.args.weight_decay,
-                    "lr": self.args.learning_rate * 10.0, 
-                },
-            ]
-
-            self.optimizer = AdamW(
-                opt_grouped_params,
-                betas=(self.args.adam_beta1, self.args.adam_beta2),
-                eps=self.args.adam_epsilon,
-            )
-        return self.optimizer
-
-# =============================================================================
-# 4. Main Execution
-# =============================================================================
-def main():
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    set_seed(training_args.seed)
-
-    # 1. Setup Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eod_id
-    tokenizer.padding_side = 'right' 
-    
-    # 2. Config & Model
+    tokenizer.padding_side = "right"
+
     config = QwenCALMConfig(
-        qwen_path=model_args.qwen_path,
-        vae_path=model_args.vae_path,
-        num_mixtures=model_args.num_mixtures,
-        use_precomputed_latents=model_args.use_precomputed_latents,
-        latent_dim=model_args.latent_dim,
-        audio_loss_weight=model_args.audio_loss_weight,
-        downsample_rate=data_args.latent_downsample 
+        qwen_path=cfg.model.qwen_path,
+        vae_path=cfg.model.vae_path,
+        num_mixtures=cfg.model.num_mixtures,
+        use_precomputed_latents=cfg.model.use_precomputed_latents,
+        latent_dim=cfg.model.latent_dim,
+        audio_loss_weight=cfg.model.audio_loss_weight,
+        downsample_rate=cfg.data.latent_downsample,
     )
     model = QwenCALM(config)
 
-    # 3. LoRA Setup
-    if model_args.use_lora:
+    # 1) Try to load pretrained projector if provided
+    if cfg.model.get("pretrained_projector_path", None):
+        path = cfg.model.pretrained_projector_path
+        console.print(f"[green]Loading pretrained input projector from: {path}[/green]")
+        state_dict = torch.load(path, map_location="cpu")
+        # support keys like 'input_proj.*' or raw param keys
+        if any(k.startswith("input_proj.") for k in state_dict.keys()):
+            state_dict = {k.replace("input_proj.", ""): v for k, v in state_dict.items()}
+
+        try:
+            model.input_proj.load_state_dict(state_dict)
+        except Exception as e:
+            console.print(f"[red]Error loading projector: {e}[/red]")
+
+    # 2) Configure LoRA (if enabled)
+    if cfg.model.use_lora:
         lora_config = LoraConfig(
-            r=model_args.lora_rank,
-            lora_alpha=model_args.lora_alpha,
+            r=cfg.model.lora_rank,
+            lora_alpha=cfg.model.lora_alpha,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=model_args.lora_dropout,
+            lora_dropout=cfg.model.lora_dropout,
             bias="none",
             task_type=TaskType.CAUSAL_LM,
-            modules_to_save=["input_proj", "output_head"] 
+            modules_to_save=["input_proj", "output_head"],  # ensure these stay available for saving
         )
         model.llm = get_peft_model(model.llm, lora_config)
-        model.llm.print_trainable_parameters()
-        
-        print("Checking trainable parameters...")
-        total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Total Trainable Params: {total_trainable}")
-    
-    # Ensure Projector/Head are trainable
-    if model_args.freeze_projector:
-        if torch.distributed.get_rank() == 0:
-            print("❄️  Freezing Audio Input Projector (using pretrained ASR alignment)...")
-        for p in model.input_proj.parameters(): 
-            p.requires_grad = False
+
+        # Load pretrained LoRA adapter if provided
+        if cfg.model.get("pretrained_lora_path", None):
+            lora_path = cfg.model.pretrained_lora_path
+            console.print(f"[green]Loading pretrained LoRA adapter from: {lora_path}[/green]")
+
+            adapter_bin_path = os.path.join(lora_path, "adapter_model.bin")
+            adapter_safe_path = os.path.join(lora_path, "adapter_model.safetensors")
+
+            adapter_weights = None
+            if os.path.exists(adapter_safe_path):
+                console.print(f"[green]Detected safetensors: {adapter_safe_path}[/green]")
+                from safetensors.torch import load_file as load_safetensors
+                adapter_weights = load_safetensors(adapter_safe_path)
+            elif os.path.exists(adapter_bin_path):
+                console.print(f"[green]Detected bin: {adapter_bin_path}[/green]")
+                adapter_weights = torch.load(adapter_bin_path, map_location="cpu")
+            else:
+                raise FileNotFoundError(f"Could not find adapter_model.bin or adapter_model.safetensors in {lora_path}")
+
+            from peft.utils import set_peft_model_state_dict
+            set_peft_model_state_dict(model.llm, adapter_weights)
+
+        console.print("[green]LoRA initialized.[/green]")
+
+    # -----------------------------------------------------------------
+    # Dynamic freeze strategy
+    # -----------------------------------------------------------------
+    should_freeze_proj = cfg.model.get("freeze_projector", False)
+
+    if should_freeze_proj:
+        model.input_proj.requires_grad_(False)
+        console.print("[yellow]Strategy: Mix/TTS -> Input projector is FROZEN.[/yellow]")
+        model.output_head.requires_grad_(True)
+        # Ensure input_proj parameters remain frozen (PEFT may change state)
+        for n, p in model.named_parameters():
+            if "input_proj" in n:
+                p.requires_grad = False
     else:
-        if torch.distributed.get_rank() == 0:
-            print("🔥 Audio Input Projector is TRAINABLE.")
-        for p in model.input_proj.parameters(): 
+        model.input_proj.requires_grad_(True)
+        console.print("[green]Strategy: ASR -> Input projector is TRAINABLE.[/green]")
+        model.output_head.requires_grad_(True)
+
+    # Always keep LoRA params trainable
+    for n, p in model.llm.named_parameters():
+        if "lora_" in n:
             p.requires_grad = True
 
-    for p in model.output_head.parameters(): 
-        p.requires_grad = True
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in model.parameters())
 
-    # 4. Data
+    console.print("[bold]Active training modules (top-level):[/bold]")
+    active_modules = set()
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            module_name = n.split(".")[0]
+            if module_name == "base_model":  # peft wrapper case
+                module_name = n.split(".")[2]
+            active_modules.add(module_name)
+    console.print(active_modules)
+    console.print(f"[cyan]Total Trainable: {trainable_params} / {all_params} ({trainable_params/all_params:.2%})[/cyan]")
+
+    # Initialize datasets and trainer
     train_dataset = CalmDataset(
-        data_dir=data_args.mel_dir,
-        librispeech_root=data_args.librispeech_root,
-        subsets=data_args.train_subsets,
+        data_dir=cfg.data.mel_dir,
+        librispeech_root=cfg.data.librispeech_root,
+        subsets=cfg.data.train_subsets,
         tokenizer=tokenizer,
-        max_text_len=data_args.max_text_len,
-        max_audio_len=data_args.max_audio_len,
-        use_latents=model_args.use_precomputed_latents,
-        task_mode=data_args.task_mode,
-        task_prob_tts=data_args.task_prob_tts
+        max_text_len=cfg.data.max_text_len,
+        max_audio_len=cfg.data.max_audio_len,
+        use_latents=cfg.model.use_precomputed_latents,
+        task_mode=cfg.data.task_mode,
+        task_prob_tts=cfg.data.task_prob_tts,
     )
 
-    eval_dir = data_args.eval_mel_dir if data_args.eval_mel_dir else data_args.mel_dir
     eval_dataset = CalmDataset(
-        data_dir=eval_dir,
-        librispeech_root=data_args.librispeech_root,
-        subsets=data_args.eval_subsets,
+        data_dir=cfg.data.eval_mel_dir or cfg.data.mel_dir,
+        librispeech_root=cfg.data.librispeech_root,
+        subsets=cfg.data.eval_subsets,
         tokenizer=tokenizer,
-        max_text_len=data_args.max_text_len,
-        max_audio_len=data_args.max_audio_len,
-        use_latents=model_args.use_precomputed_latents,
-        task_mode=data_args.task_mode,
-        task_prob_tts=data_args.task_prob_tts 
+        max_text_len=cfg.data.max_text_len,
+        max_audio_len=cfg.data.max_audio_len,
+        use_latents=cfg.model.use_precomputed_latents,
+        task_mode="mix",
+        task_prob_tts=0.5,
     )
 
     trainer = CalmTrainer(
@@ -439,7 +443,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=CalmCollator(pad_token_id=tokenizer.pad_token_id)
+        data_collator=CalmCollator(pad_token_id=tokenizer.pad_token_id),
     )
 
     if training_args.resume_from_checkpoint:
@@ -448,6 +452,7 @@ def main():
         trainer.train()
 
     trainer.save_model(training_args.output_dir)
+
 
 if __name__ == "__main__":
     main()

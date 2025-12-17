@@ -1,14 +1,9 @@
 #!/bin/bash
 
 export CUDA_VISIBLE_DEVICES=0
-
+export WANDB_PROJECT="Audio-CALM-VAE" 
+export WANDB_NAME="vae-run-2x_kl_annealing_l1_ssim_eval"
 WORK_PATH=$(pwd)
-CHECKPOINT_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_4x_kl_annealing"
-AUDIO_PATH="/data0/determined/users/andywu/speechcalm/data/full_wavs/test-clean/61-70970-0025_000.wav"
-OUTPUT_DIR="${WORK_PATH}/outputs/eval_results_vae"
+CHECKPOINT_PATH="${WORK_PATH}/outputs/checkpoints/audio_vae_2x_kl_annealing_l1_ssim/checkpoint-6900"
 
-
-python eval/eval_vae.py \
-    --checkpoint ${CHECKPOINT_PATH} \
-    --audio_path ${AUDIO_PATH} \
-    --output_dir ${OUTPUT_DIR}
+python eval/eval_vae.py --checkpoint ${CHECKPOINT_PATH} --web_demo --output_dir "${WORK_PATH}/outputs/eval_results_vae/audio_vae_2x_kl_annealing_l1_ssim"
