@@ -7,3 +7,5 @@ gittoken.txt
 qwen2_audio_pretrained/
 wandb/
 tmp_hifigan_checkpoints/
+eval_calm.log
+train_calm.log
