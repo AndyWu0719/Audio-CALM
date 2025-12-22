@@ -4,6 +4,7 @@ Optimized for Speed, DDP Stability (Ghost Gradients), and Mixture of Adapters (M
 """
 
 import os
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 import sys
 import math
 import random

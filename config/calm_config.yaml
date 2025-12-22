@@ -152,6 +152,6 @@ evaluation:
   eval_asr_model: "openai/whisper-tiny.en"
   
   # Tracking
-  wandb_project: "Audio-CALM-MoA"
+  wandb_project: "Audio-CALM-VAE"
   wandb_entity: null
   web_demo: False

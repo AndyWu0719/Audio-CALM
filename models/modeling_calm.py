@@ -196,10 +196,17 @@ class QwenCALM(PreTrainedModel):
         
         # 1. Load LLM Backbone
         print(f"Loading Qwen from {config.qwen_path}...")
+        try:
+            attn_impl = "flash_attention_2"
+            import flash_attn
+            print(f"✅ Flash Attention 2 found, using it for attention implementation.")
+        except ImportError:
+            print("⚠️ Flash Attention 2 not found, falling back to SDPA.")
+            attn_impl = "sdpa"
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, trust_remote_code=True, 
             torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, 
-            attn_implementation="sdpa"
+            attn_implementation=attn_impl
         )
 
         # 2. VAE Setup
