@@ -20,7 +20,7 @@ from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from peft.utils import set_peft_model_state_dict
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from rich.console import Console
 from rich.traceback import install
 
@@ -48,13 +48,14 @@ def _get_rank_safe() -> int:
 # Dataset Definition
 # ---------------------------------------------------------------------
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=512, 
+    def __init__(self, latent_dir, subsets, tokenizer, max_text_len=512, 
                  max_audio_len=1024, use_latents=False, task_mode="mix", task_prob_tts=0.5):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
         self.task_mode = task_mode
         self.task_prob_tts = task_prob_tts
+        self.latent_dir = latent_dir
         
         # Handle tokenizer special tokens
         if hasattr(tokenizer, "eod_id"):
@@ -63,26 +64,46 @@ class CalmDataset(Dataset):
              enc = tokenizer.encode("<|im_end|>", add_special_tokens=False)
              self.im_end_id = enc[-1] if len(enc)>0 else tokenizer.eos_token_id
 
-        # Indexing files
+        # =================================================================
+        # Scanning Logic (Recursive Scan in Latent Dir)
+        # =================================================================
         self.data = []
-        if _get_rank_safe() == 0: console.log(f"[green]Scanning: {subsets}[/green]")
-        file_index = {os.path.splitext(os.path.basename(f))[0]: f for f in glob(os.path.join(data_dir, "**", "*.pt"), recursive=True)}
-        
+        if _get_rank_safe() == 0: 
+            console.log(f"[green]Scanning Latent Directory: {latent_dir}[/green]")
+            console.log(f"[dim]Subsets pattern: {subsets}[/dim]")
+
+        trans_files = []
         for subset in subsets.split(","):
-            subset_dir = os.path.join(librispeech_root, subset.strip())
-            if not os.path.exists(subset_dir): continue
-            for root, _, files in os.walk(subset_dir):
-                for f in files:
-                    if f.endswith(".trans.txt"):
-                        with open(os.path.join(root, f), "r") as fh:
-                            for line in fh:
-                                parts = line.strip().split(" ", 1)
-                                if len(parts) != 2: continue
-                                fid, txt = parts
-                                if fid in file_index:
-                                    self.data.append({"text": txt, "file_path": file_index[fid]})
+            subset = subset.strip()
+            if subset == ".":
+                pattern = os.path.join(latent_dir, "**", "*.trans.txt")
+            else:
+                pattern = os.path.join(latent_dir, subset, "**", "*.trans.txt")
+            
+            found = glob(pattern, recursive=True)
+            trans_files.extend(found)
+
+        for trans_file in trans_files:
+            folder = os.path.dirname(trans_file)
+            try:
+                with open(trans_file, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.strip().split(" ", 1)
+                        if len(parts) != 2: continue
+                        
+                        fid, txt = parts
+                        pt_path = os.path.join(folder, f"{fid}.pt")
+                        
+                        if os.path.exists(pt_path):
+                            self.data.append({"text": txt, "file_path": pt_path})
+            except Exception:
+                continue
                                     
-        if _get_rank_safe() == 0: console.log(f"[green]Matched Pairs: {len(self.data)}[/green]")
+        if _get_rank_safe() == 0: 
+            console.log(f"[bold green]Matched Pairs: {len(self.data)}[/bold green]")
+            if len(self.data) == 0:
+                console.log(f"[bold red]❌ CRITICAL: No data found in {latent_dir}.[/bold red]")
+                console.log(f"   Please check if your config 'train_subsets' matches the folder structure.")
 
     def __len__(self): return len(self.data)
 
@@ -96,7 +117,7 @@ class CalmDataset(Dataset):
             else:
                 mode = self.task_mode
 
-            # 2. Load Audio
+            # 2. Load Audio Latent
             payload = torch.load(item["file_path"], map_location="cpu")
             audio = payload.get("latent", payload) if isinstance(payload, dict) else payload
             if audio is None: return {"_valid": False}
@@ -246,7 +267,7 @@ class CalmTrainer(Trainer):
                 {"params": decay_parameters, "weight_decay": self.args.weight_decay, "lr": self.args.learning_rate},
                 {"params": no_decay_parameters, "weight_decay": 0.0, "lr": self.args.learning_rate},
                 # High LR for Projectors
-                {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 1.0 * self.args.learning_rate}, # fine-tune with 1.0x for clarity, or 20x as needed
+                {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 1.0 * self.args.learning_rate}, 
             ]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
@@ -272,7 +293,6 @@ class CalmTrainer(Trainer):
         loss = outputs["loss"]
 
         # 4. [Ghost Gradients] DDP Deadlock Prevention
-        # Ensures all params participate in the graph
         if self.model.training:
             dummy_loss = sum(p.view(-1)[0] * 0.0 for p in raw_model.parameters() if p.requires_grad)
             loss += dummy_loss
@@ -343,7 +363,22 @@ def load_soft_restart_components(model, cfg, console):
 # ---------------------------------------------------------------------
 @hydra.main(version_base=None, config_path="../config", config_name="calm_config")
 def main(cfg: DictConfig):
-    console.rule("[magenta]Flow-based Audio-CALM Training[/magenta]")
+    task_mode = cfg.data.task_mode
+    print(f"🔄 [Config] Task Mode: {task_mode.upper()}")
+
+    if task_mode not in cfg.data.datasets:
+        raise ValueError(f"❌ Unknown task_mode: '{task_mode}'. Available: {list(cfg.data.datasets.keys())}")
+
+    selected_paths = cfg.data.datasets[task_mode]
+
+    with open_dict(cfg):
+        cfg.data.latent_dir = selected_paths.latent_dir
+        cfg.data.eval_latent_dir = selected_paths.eval_latent_dir
+        cfg.data.raw_root = selected_paths.raw_root
+
+    print(f"📂 [Data] Training Latents: {cfg.data.latent_dir}")
+    print(f"📂 [Data] Eval Latents:     {cfg.data.eval_latent_dir}")
+
     set_seed(cfg.training.seed)
     
     training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
@@ -359,7 +394,7 @@ def main(cfg: DictConfig):
     config = QwenCALMConfig(
         qwen_path=cfg.model.qwen_path,
         vae_path=cfg.model.vae_path,
-        head_type="flow", # Hardcoded to flow as per instructions
+        head_type="flow", 
         use_precomputed_latents=cfg.model.use_precomputed_latents,
         latent_dim=cfg.model.latent_dim,
         audio_loss_weight=cfg.model.audio_loss_weight,
@@ -428,15 +463,24 @@ def main(cfg: DictConfig):
 
     # 5. Trainer Setup
     train_ds = CalmDataset(
-        cfg.data.mel_dir, cfg.data.librispeech_root, cfg.data.train_subsets, 
-        tokenizer, cfg.data.max_text_len, cfg.data.max_audio_len, 
-        cfg.model.use_precomputed_latents, cfg.data.task_mode, cfg.data.task_prob_tts
+        latent_dir=cfg.data.latent_dir, 
+        subsets=cfg.data.train_subsets, 
+        tokenizer=tokenizer, 
+        max_text_len=cfg.data.max_text_len, 
+        max_audio_len=cfg.data.max_audio_len, 
+        use_latents=cfg.model.use_precomputed_latents, 
+        task_mode=cfg.data.task_mode, 
+        task_prob_tts=cfg.data.task_prob_tts
     )
     eval_ds = CalmDataset(
-        cfg.data.eval_mel_dir or cfg.data.mel_dir, cfg.data.librispeech_root, 
-        cfg.data.eval_subsets, tokenizer, cfg.data.max_text_len, 
-        cfg.data.max_audio_len, cfg.model.use_precomputed_latents, 
-        cfg.data.task_mode, cfg.data.task_prob_tts
+        latent_dir=cfg.data.eval_latent_dir or cfg.data.latent_dir, 
+        subsets=cfg.data.eval_subsets, 
+        tokenizer=tokenizer, 
+        max_text_len=cfg.data.max_text_len, 
+        max_audio_len=cfg.data.max_audio_len, 
+        use_latents=cfg.model.use_precomputed_latents, 
+        task_mode=cfg.data.task_mode, 
+        task_prob_tts=cfg.data.task_prob_tts
     )
     
     train_collator = CalmCollator(tokenizer.pad_token_id, training=True)

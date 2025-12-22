@@ -51,25 +51,32 @@ model:
 # DATA CONFIGURATION
 # -------------------------------------------------------------------
 data:
-  # Subsets
+  task_mode: "tts" 
+  task_prob_tts: 1.0
+
+  datasets:
+    tts:
+      raw_root: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/train"
+      latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriTTS_R"
+      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriTTS_R"
+    
+    asr:
+      raw_root: "${hydra:runtime.cwd}/data/raw/LibriSpeech/train"
+      latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriSpeech"
+      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriSpeech"
+    
+    mix:
+      raw_root: null
+      latent_dir: "${hydra:runtime.cwd}/data/latents/train" 
+      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev"
+
   train_subsets: "train-clean-100,train-clean-360,train-other-500"
   eval_subsets: "dev-clean"
   
   # Sequence Constraints
   max_text_len: 512
-  max_audio_len: 1024     # Matches VAE latent frames
-  
-  # Processing
-  latent_downsample: 4    # Used for mask calculation if latents are precomputed
-  
-  # Task Configuration
-  task_mode: "tts"        # Options: "mix", "tts", "asr"
-  task_prob_tts: 1.0      # Probability of TTS in mix mode
-
-  # Paths
-  librispeech_root: "/data0/determined/users/andywu/Audio-CALM-v2/data/LibriTTS-R/train" # "/data0/determined/users/andywu/speechcalm/data/full_librispeech/LibriSpeech"
-  mel_dir: "/data0/determined/users/andywu/Audio-CALM-v2/data/latents/LibriTTS-R_FULL/train" # "${hydra:runtime.cwd}/data/latents/train"
-  eval_mel_dir: "/data0/determined/users/andywu/Audio-CALM-v2/data/latents/LibriTTS-R_FULL/dev-clean" # "${hydra:runtime.cwd}/data/latents/dev"
+  max_audio_len: 1024 
+  latent_downsample: 4
 
 # -------------------------------------------------------------------
 # TRAINING CONFIGURATION
