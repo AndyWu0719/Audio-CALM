@@ -1,0 +1,314 @@
+[2025-12-17 19:32:41,443][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:34:54,844][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:36:46,875][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:36:48,942][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:36:50,080][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_latent_flow/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:36:50,081][eval][WARNING] - ⚠️ input_proj.bin not found in checkpoint!
+[2025-12-17 19:36:50,082][eval][WARNING] - ⚠️ output_head.bin not found in checkpoint!
+[2025-12-17 19:36:53,451][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:36:54,240][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,241][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,243][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,244][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,245][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,247][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,247][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,247][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,247][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,247][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,248][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,248][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,248][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,248][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:36:54,274][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:38:05,909][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:38:07,799][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:38:08,918][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:38:08,919][eval][WARNING] - ⚠️ input_proj.bin not found in checkpoint!
+[2025-12-17 19:38:08,919][eval][WARNING] - ⚠️ output_head.bin not found in checkpoint!
+[2025-12-17 19:38:12,073][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:40:34,968][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:40:36,813][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:40:37,929][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:40:37,930][eval][WARNING] - ⚠️ input_proj.bin not found in checkpoint!
+[2025-12-17 19:40:37,930][eval][WARNING] - ⚠️ output_head.bin not found in checkpoint!
+[2025-12-17 19:40:41,120][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:40:41,140][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:40:41,148][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-17 19:40:41,149][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-17 19:40:41,149][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-17 19:40:41,149][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-17 19:40:41,267][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [disable_jit_profiling, allow_tf32]
+[2025-12-17 19:40:41,267][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-17 19:40:41,268][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-17 19:40:41,269][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-17 19:40:41,278][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-17 19:40:41,279][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-17 19:40:41,662][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:40:42,000][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-17 19:40:42,000][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-17 19:40:42,001][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:40:42,001][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-17 19:40:42,001][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:40:42,764][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-17 19:41:22,015][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:41:23,907][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:41:25,063][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:41:29,082][eval][INFO] - Loaded input_proj.
+[2025-12-17 19:41:29,168][eval][INFO] - Loaded output_head.
+[2025-12-17 19:41:32,259][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:41:32,286][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:41:32,294][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-17 19:41:32,295][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-17 19:41:32,295][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-17 19:41:32,295][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-17 19:41:32,352][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [disable_jit_profiling, allow_tf32]
+[2025-12-17 19:41:32,354][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-17 19:41:32,355][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-17 19:41:32,355][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-17 19:41:32,366][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-17 19:41:32,366][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-17 19:41:32,658][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:41:32,773][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-17 19:41:32,774][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-17 19:41:32,774][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:41:32,774][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-17 19:41:32,775][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:41:33,548][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-17 19:41:56,356][eval][ERROR] - TTS Failed on sample 0: Expected 1D or 2D tensor, got 3D tensor
+[2025-12-17 19:42:09,943][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,943][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,945][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,946][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,946][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,947][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,950][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,950][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,950][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,950][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,951][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,951][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,951][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,951][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,952][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:42:09,957][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:44:05,084][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:44:06,836][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:44:07,960][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:44:11,922][eval][INFO] - Loaded input_proj.
+[2025-12-17 19:44:11,996][eval][INFO] - Loaded output_head.
+[2025-12-17 19:44:15,202][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:44:15,218][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:44:15,225][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-17 19:44:15,226][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-17 19:44:15,226][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-17 19:44:15,226][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-17 19:44:15,269][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+[2025-12-17 19:44:15,270][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-17 19:44:15,271][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-17 19:44:15,271][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-17 19:44:15,280][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-17 19:44:15,281][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-17 19:44:15,974][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:44:16,084][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-17 19:44:16,084][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-17 19:44:16,085][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:44:16,085][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-17 19:44:16,086][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:44:16,837][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-17 19:47:24,151][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,152][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,154][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,155][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,155][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,156][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,159][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,159][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,159][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,159][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,160][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,160][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,160][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,160][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,161][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,162][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:47:24,181][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 19:54:21,397][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 19:54:23,256][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:54:24,372][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:54:28,396][eval][INFO] - Loaded input_proj.
+[2025-12-17 19:54:28,472][eval][INFO] - Loaded output_head.
+[2025-12-17 19:54:31,561][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:54:31,577][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:54:31,583][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-17 19:54:31,584][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-17 19:54:31,584][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-17 19:54:31,584][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-17 19:54:31,623][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+[2025-12-17 19:54:31,624][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-17 19:54:31,625][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-17 19:54:31,625][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-17 19:54:31,634][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-17 19:54:31,635][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-17 19:54:32,439][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:54:32,543][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-17 19:54:32,544][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-17 19:54:32,544][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:54:32,544][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-17 19:54:32,544][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:54:33,318][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-17 19:54:33,319][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-17 19:54:33,594][eval][INFO] - ✅ Oracle test saved to /data0/determined/users/andywu/Audio-CALM-v2/outputs/eval_results_flow/eval-flow-mix-4-dim64-1e-4--2048-4/oracle_test. Please listen to 'oracle_denorm.wav' first!
+[2025-12-17 19:59:21,723][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 19:59:22,848][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 19:59:30,162][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 19:59:30,178][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:59:30,184][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-17 19:59:30,185][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-17 19:59:30,185][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-17 19:59:30,185][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-17 19:59:30,224][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+[2025-12-17 19:59:30,224][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-17 19:59:30,225][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-17 19:59:30,225][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-17 19:59:30,235][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-17 19:59:30,235][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-17 19:59:30,940][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 19:59:31,055][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-17 19:59:31,055][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-17 19:59:31,056][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:59:31,056][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-17 19:59:31,056][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 19:59:31,813][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-17 19:59:32,086][eval][INFO] - ✅ Oracle test saved. If this sounds good, VAE/Vocoder are fine.
+[2025-12-17 20:02:26,072][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,072][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,075][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,075][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,076][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,076][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,080][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,080][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,081][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,081][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,081][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,081][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,082][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,087][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:02:26,102][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:08:38,136][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-17 20:08:40,026][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-17 20:08:41,159][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6000...
+[2025-12-17 20:08:45,266][eval][INFO] - Loaded input_proj.
+[2025-12-17 20:08:45,340][eval][INFO] - Loaded output_head.
+[2025-12-17 20:08:48,517][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-17 20:08:48,532][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 20:08:48,539][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-17 20:08:48,539][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-17 20:08:48,539][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-17 20:08:48,540][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-17 20:08:48,578][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [disable_jit_profiling, allow_tf32]
+[2025-12-17 20:08:48,579][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-17 20:08:48,580][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-17 20:08:48,580][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-17 20:08:48,592][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-17 20:08:48,592][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-17 20:08:49,376][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-17 20:08:49,491][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-17 20:08:49,492][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-17 20:08:49,492][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 20:08:49,492][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-17 20:08:49,492][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-17 20:08:50,282][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-17 20:08:50,283][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-17 20:08:50,551][eval][INFO] - ✅ Oracle test saved to /data0/determined/users/andywu/Audio-CALM-v2/outputs/eval_results_flow/eval-flow-mix-4-dim64-1e-4--2048-4/oracle_test. Please listen to 'oracle_raw_norm.wav'!
+[2025-12-17 20:09:43,286][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,287][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,289][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,289][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,290][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,290][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,291][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,294][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,295][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,295][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,295][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,295][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,295][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,295][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,296][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,296][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,301][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-17 20:09:43,316][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:15:26,042][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-18 13:15:28,022][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-18 13:15:29,410][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6594...
+[2025-12-18 13:15:34,414][eval][INFO] - Loaded input_proj.
+[2025-12-18 13:15:34,619][eval][INFO] - Loaded output_head.
+[2025-12-18 13:15:56,322][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-18 13:15:56,338][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-18 13:15:56,345][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-18 13:15:56,345][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-18 13:15:56,346][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-18 13:15:56,346][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-18 13:15:56,384][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [disable_jit_profiling, allow_tf32]
+[2025-12-18 13:15:56,385][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-18 13:15:56,386][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-18 13:15:56,386][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-18 13:15:56,396][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-18 13:15:56,397][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-18 13:15:56,726][speechbrain.utils.torch_audio_backend][WARNING] - SpeechBrain could not find any working torchaudio backend. Audio files may fail to load. Follow this link for instructions and troubleshooting: https://speechbrain.readthedocs.io/en/latest/audioloading.html
+[2025-12-18 13:15:56,829][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-18 13:15:56,830][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-18 13:15:56,830][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-18 13:15:56,830][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-18 13:15:56,830][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-18 13:15:57,626][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-18 13:15:57,627][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-18 13:15:57,934][eval][INFO] - ✅ Oracle test saved to /data0/determined/users/andywu/Audio-CALM-v2/outputs/eval_results_flow/eval-flow-mix-4-dim64-1e-4--2048-4/oracle_test. Please listen to 'oracle_raw_norm.wav'!
+[2025-12-18 13:21:14,491][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,492][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,494][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,495][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,496][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,499][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,499][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,499][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,499][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,500][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,500][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,500][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,500][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,500][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:21:14,506][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-18 13:22:56,576][eval][INFO] - Mode: asr (TTS=False, ASR=True)
+[2025-12-18 13:22:58,407][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-18 13:22:59,699][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6594...
+[2025-12-18 13:23:03,719][eval][INFO] - Loaded input_proj.
+[2025-12-18 13:23:03,789][eval][INFO] - Loaded output_head.
+[2025-12-18 13:23:07,837][eval][INFO] - >>> Starting ASR Evaluation
+[2025-12-18 13:24:50,780][eval][INFO] - Mode: asr (TTS=False, ASR=True)
+[2025-12-18 13:24:52,601][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-18 13:24:53,895][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/flow/flow-mix-4-dim64-1e-4-2048-4/checkpoint-6594...
+[2025-12-18 13:24:57,941][eval][INFO] - Loaded input_proj.
+[2025-12-18 13:24:58,038][eval][INFO] - Loaded output_head.
+[2025-12-18 13:25:01,880][eval][INFO] - >>> Starting ASR Evaluation
+[2025-12-18 13:25:56,110][eval][INFO] - 🔥 ASR Evaluation Complete. Global WER: 0.3083
+[2025-12-20 02:28:11,848][eval][INFO] - Mode: asr (TTS=False, ASR=True)
+[2025-12-20 02:28:13,734][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-20 02:28:14,849][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-4000...
+[2025-12-20 02:28:14,850][eval][INFO] - Found multiple adapters (MoA).
+[2025-12-20 02:28:14,850][eval][INFO] - Loading ASR adapter from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-4000/asr
+[2025-12-20 02:28:18,939][eval][INFO] - Loaded input_proj.
+[2025-12-20 02:28:19,006][eval][INFO] - Loaded output_head.
+[2025-12-20 02:28:23,677][eval][INFO] - >>> Starting ASR Evaluation
+[2025-12-20 02:29:20,019][eval][INFO] - 🔥 ASR Evaluation Complete. Global WER: 0.1536
+[2025-12-21 21:14:19,258][eval][INFO] - Mode: asr (TTS=False, ASR=True)
+[2025-12-21 21:14:21,109][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-21 21:14:22,268][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-6594...
+[2025-12-21 21:14:22,269][eval][INFO] - Found multiple adapters (MoA).
+[2025-12-21 21:14:22,269][eval][INFO] - Loading ASR adapter from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-6594/asr
+[2025-12-21 21:14:27,184][eval][INFO] - Loaded input_proj.
+[2025-12-21 21:14:27,380][eval][INFO] - Loaded output_head.
+[2025-12-21 21:14:32,579][eval][INFO] - >>> Starting ASR Evaluation
+[2025-12-21 21:15:26,543][eval][INFO] - 🔥 ASR Evaluation Complete. Global WER: 0.1317

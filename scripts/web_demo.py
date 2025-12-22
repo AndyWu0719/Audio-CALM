@@ -4,7 +4,7 @@ import torchaudio
 import numpy as np
 import os
 from transformers import AutoTokenizer
-from models.modeling_gmm import QwenCALM, QwenCALMConfig
+from models.modeling_calm import QwenCALM, QwenCALMConfig
 from peft import PeftModel
 
 # === Config ===

@@ -1,331 +1,239 @@
+"""
+Flow-based Audio-CALM Training Script.
+Optimized for Speed, DDP Stability (Ghost Gradients), and Mixture of Adapters (MoA).
+"""
+
 import os
 import sys
-import torch
-import random
-from dataclasses import dataclass, field
-import torch.distributed as dist
-from typing import List, Dict
-from glob import glob
 import math
+import random
+import warnings
+from dataclasses import dataclass
+from typing import List, Dict, Any
+from glob import glob
+
+import torch
+import torch.distributed as dist
+from torch.utils.data import Dataset, DataLoader
+from transformers import Trainer, TrainingArguments, set_seed, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
+from peft.utils import set_peft_model_state_dict
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from rich.console import Console
+from rich.traceback import install
+
+# --- Monkey Patch for PyTorch 2.6+ & DeepSpeed ---
+_orig_torch_load = torch.load
+def safe_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs: kwargs['weights_only'] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = safe_torch_load
+# -------------------------------------------------
 
 sys.path.append(os.getcwd())
-
-from torch.utils.data import Dataset
-from transformers import (
-    Trainer, 
-    TrainingArguments, 
-    HfArgumentParser, 
-    set_seed, 
-    AutoTokenizer, 
-    BitsAndBytesConfig
-)
-from torch.optim import AdamW
 from models.modeling_calm import QwenCALM, QwenCALMConfig
-from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
-from functools import partial
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
 
+install(show_locals=False)
+console = Console()
+warnings.filterwarnings("ignore")
 torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 
-@dataclass
-class ModelArguments:
-    qwen_path: str = field(metadata={"help": "Path to Qwen-Audio pretrained folder"})
-    vae_path: str = field(metadata={"help": "Path to trained VAE checkpoint folder"})
-    use_lora: bool = field(default=True, metadata={"help": "Whether to use LoRA"})
-    use_qlora: bool = field(default=True, metadata={"help": "Enable 4-bit QLoRA to save VRAM"})
-    lora_rank: int = field(default=64, metadata={"help": "LoRA Rank"})
-    lora_alpha: int = field(default=16, metadata={"help": "LoRA Alpha"})
-    lora_dropout: float = field(default=0.05, metadata={"help": "LoRA Dropout"})
-    use_precomputed_latents: bool = field(default=False, metadata={"help": "If True, load latents directly from disk."})
-    latent_dim: int = 64
-    noise_size: int = field(default=64, metadata={"help": "Dimension of the noise vector for Energy Head"})
-    num_mlp_layers: int = field(default=2, metadata={"help": "Number of layers in the MLP Generator"})
-    num_samples: int = field(default=8, metadata={"help": "Number of samples for Energy Loss calculation"})
-    beta: float = field(default=0.25, metadata={"help": "Beta parameter for Energy distance"})
-    temperature: float = field(default=1.0, metadata={"help": "Sampling temperature during training"})
-    
-@dataclass
-class DataArguments:
-    librispeech_root: str = field(metadata={"help": "Path to original LibriSpeech dataset root"})
-    mel_dir: str = field(metadata={"help": "Path to data directory (Mel .pt or Latent .pt)"})
-    eval_mel_dir: str = field(default=None, metadata={"help": "Path to EVAL data directory. If None, use mel_dir"})
-    train_subsets: str = field(default="train-clean-100,train-clean-360,train-other-500")
-    eval_subsets: str = field(default="dev-clean")
-    max_text_len: int = field(default=256)
-    max_audio_len: int = field(default=512, metadata={"help": "Max Latent frames. (e.g. 128 latents ~= 32s audio)"})
-    latent_downsample: int = field(default=4)
-    task_mode: str = field(default="asr", metadata={"help": "Training mode: 'joint', 'asr', or 'tts'"})
+def _get_rank_safe() -> int:
+    try: return dist.get_rank()
+    except: return 0
 
+# ---------------------------------------------------------------------
+# Dataset Definition
+# ---------------------------------------------------------------------
 class CalmDataset(Dataset):
-    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=256, max_audio_len=512, use_latents=False, latent_downsample=16, is_eval=False, task_mode="joint"):
+    def __init__(self, data_dir, librispeech_root, subsets, tokenizer, max_text_len=512, 
+                 max_audio_len=1024, use_latents=False, task_mode="mix", task_prob_tts=0.5):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
-        self.use_latents = use_latents
-        self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eod_id
-        self.latent_downsample = latent_downsample
-        self.is_eval = is_eval
-        self.task_mode = task_mode # 'joint', 'asr', 'tts'
+        self.task_mode = task_mode
+        self.task_prob_tts = task_prob_tts
         
+        # Handle tokenizer special tokens
+        if hasattr(tokenizer, "eod_id"):
+             self.im_end_id = tokenizer.eod_id
+        else:
+             enc = tokenizer.encode("<|im_end|>", add_special_tokens=False)
+             self.im_end_id = enc[-1] if len(enc)>0 else tokenizer.eos_token_id
+
+        # Indexing files
         self.data = []
-        subset_list = subsets.split(",")
-        print(f"Scanning pairs in {subset_list} (Mode: {self.task_mode})...")
+        if _get_rank_safe() == 0: console.log(f"[green]Scanning: {subsets}[/green]")
+        file_index = {os.path.splitext(os.path.basename(f))[0]: f for f in glob(os.path.join(data_dir, "**", "*.pt"), recursive=True)}
         
-        file_index = {}
-        for subset in subset_list:
-            subset_dir = os.path.join(data_dir, subset.strip())
-            if not os.path.exists(subset_dir): continue
-            files = glob(os.path.join(subset_dir, "*.pt"))
-            for f in files:
-                key = os.path.splitext(os.path.basename(f))[0]
-                file_index[key] = f
-        
-        for subset in subset_list:
+        for subset in subsets.split(","):
             subset_dir = os.path.join(librispeech_root, subset.strip())
             if not os.path.exists(subset_dir): continue
-            for root, dirs, files in os.walk(subset_dir):
-                for file in files:
-                    if file.endswith(".trans.txt"):
-                        try:
-                            with open(os.path.join(root, file), "r") as f:
-                                for line in f:
-                                    parts = line.strip().split(" ", 1)
-                                    if len(parts) != 2: continue
-                                    file_id, text = parts
-                                    if file_id in file_index:
-                                        self.data.append({"text": text, "file_path": file_index[file_id]})
-                        except: pass
-        print(f"Total matched pairs: {len(self.data)}")
-        
-        print("Pre-loading all latents into RAM...")
-        self.cached_latents = {}
-        def load_file(idx_item_tuple):
-            i, item = idx_item_tuple
-            try:
-                tensor = torch.load(item['file_path'], map_location="cpu").to(torch.float16)
-                return item['file_path'], tensor
-            except: return None, None
+            for root, _, files in os.walk(subset_dir):
+                for f in files:
+                    if f.endswith(".trans.txt"):
+                        with open(os.path.join(root, f), "r") as fh:
+                            for line in fh:
+                                parts = line.strip().split(" ", 1)
+                                if len(parts) != 2: continue
+                                fid, txt = parts
+                                if fid in file_index:
+                                    self.data.append({"text": txt, "file_path": file_index[fid]})
+                                    
+        if _get_rank_safe() == 0: console.log(f"[green]Matched Pairs: {len(self.data)}[/green]")
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = [executor.submit(load_file, (i, item)) for i, item in enumerate(self.data)]
-            for future in tqdm(as_completed(futures), total=len(self.data), desc="Loading"):
-                path, tensor = future.result()
-                if path is not None: self.cached_latents[path] = tensor
+    def __len__(self): return len(self.data)
 
-    def __len__(self):
-        return len(self.data)
-    
     def __getitem__(self, idx):
-        text_ids = [self.pad_id]
-        labels = [-100]
-        audio = torch.zeros(64, 10)
-        task_mode = "tts" 
-        real_audio_len = 10
-
         try:
             item = self.data[idx]
-            text_content = item['text']
             
-            # [MODIFIED] Task Selection Logic
-            if self.task_mode == "joint":
-                # Original logic: alternating for eval, random for train
-                if self.is_eval:
-                    task_mode = "tts" if idx % 2 == 0 else "asr"
-                else:
-                    task_mode = "tts" if random.random() < 0.5 else "asr"
+            # 1. Determine Task Mode
+            if self.task_mode == "mix":
+                mode = "tts" if random.random() < self.task_prob_tts else "asr"
             else:
-                # Forced mode (ASR or TTS)
-                task_mode = self.task_mode
+                mode = self.task_mode
+
+            # 2. Load Audio
+            payload = torch.load(item["file_path"], map_location="cpu")
+            audio = payload.get("latent", payload) if isinstance(payload, dict) else payload
+            if audio is None: return {"_valid": False}
             
-            if task_mode == "tts":
-                prompt = f"<|im_start|>user\nRead this: {text_content}<|im_end|>\n<|im_start|>assistant\n"
-                text_ids = self.tokenizer.encode(prompt)
+            # Ensure shape is [T, Dim]
+            if audio.shape[0] == 64: audio = audio.transpose(0, 1)
+            
+            # 3. Audio Cropping
+            # ASR requires strict alignment (drop if too long), TTS can be random cropped
+            if audio.shape[0] > self.max_audio_len:
+                if mode == "asr": 
+                    return {"input_ids": [0], "_valid": False}
+                else:
+                    start = random.randint(0, audio.shape[0] - self.max_audio_len)
+                    audio = audio[start : start + self.max_audio_len]
+
+            # 4. Construct Prompt
+            prompt = f"Read this text:\n{item['text']}" if mode == "tts" else "Transcribe the following audio:"
+            user_txt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            user_ids = self.tokenizer.encode(user_txt, add_special_tokens=False)
+            
+            if mode == "tts":
+                text_ids = user_ids
                 labels = [-100] * len(text_ids)
             else:
-                prompt = f"<|im_start|>user\nTranscribe audio:<|im_end|>\n<|im_start|>assistant\n"
-                prompt_ids = self.tokenizer.encode(prompt)
-                target_ids = self.tokenizer.encode(text_content + "<|im_end|>")
-                text_ids = prompt_ids + target_ids
-                labels = [-100] * len(prompt_ids) + target_ids
+                target_txt = f"{item['text']}<|im_end|>"
+                target_ids = self.tokenizer.encode(target_txt, add_special_tokens=False)
+                
+                # Smart truncation to ensure EOS token exists
+                max_target_len = self.max_text_len - len(user_ids)
+                if len(target_ids) > max_target_len:
+                    target_ids = target_ids[:max_target_len]
+                    if self.im_end_id is not None:
+                        target_ids[-1] = self.im_end_id
 
+                text_ids = user_ids + target_ids
+                labels = [-100] * len(user_ids) + target_ids
+
+            # Final length check
             if len(text_ids) > self.max_text_len:
                 text_ids = text_ids[:self.max_text_len]
                 labels = labels[:self.max_text_len]
 
-            path = item['file_path']
-            if path in self.cached_latents:
-                audio = self.cached_latents[path].float() 
-            else:
-                audio = torch.load(path, map_location="cpu")
-            
-            TARGET_LEN = self.max_audio_len 
-            real_audio_len = audio.shape[1]
-            
-            if audio.shape[1] > TARGET_LEN:
-                start = torch.randint(0, audio.shape[1] - TARGET_LEN, (1,)).item()
-                audio = audio[:, start:start+TARGET_LEN]
-                real_audio_len = TARGET_LEN
-            else:
-                pad_len = TARGET_LEN - audio.shape[1]
-                audio = torch.nn.functional.pad(audio, (0, pad_len))
-                
+            return {
+                "input_ids": torch.tensor(text_ids, dtype=torch.long),
+                "labels": torch.tensor(labels, dtype=torch.long),
+                "audio_features": audio,
+                "task_mode": mode,
+                "_valid": True
+            }
         except Exception as e:
-            print(f"[Dataset Error] idx={idx}: {e}")
+            return {"input_ids": [0], "_valid": False}
 
-        return {
-            "text_ids": torch.tensor(text_ids, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-            "audio_features": audio,
-            "task_mode": task_mode,
-            "real_audio_len": real_audio_len
+# ---------------------------------------------------------------------
+# Data Collator
+# ---------------------------------------------------------------------
+@dataclass
+class CalmCollator:
+    pad_token_id: int
+    audio_pad_val: float = 0.0
+    training: bool = False
+
+    def _apply_spec_augment(self, audio_feat: torch.Tensor):
+        D, T = audio_feat.shape
+        num_masks = 1 if T < 150 else 2
+        for _ in range(num_masks):
+            if T > 20:
+                mask_len = random.randint(5, 10) 
+                t0 = random.randint(0, T - mask_len)
+                audio_feat[:, t0 : t0 + mask_len].fill_(0.0)
+        return audio_feat
+
+    def __call__(self, features):
+        valid = [f for f in features if f.get("_valid", False)]
+        
+        # Handle empty batch
+        if not valid:
+            return {
+                "text_input_ids": torch.tensor([[self.pad_token_id]], dtype=torch.long),
+                "attention_mask": torch.tensor([[0]], dtype=torch.long),
+                "labels": torch.tensor([[-100]], dtype=torch.long),
+                "audio_features": torch.zeros(1, 1, 64),
+                "audio_lens": torch.tensor([1], dtype=torch.long),
+                "task_modes": ["tts"]
+            }
+
+        proc_audio = []
+        for f in valid:
+            feat = f["audio_features"]
+            feat = feat.transpose(0, 1) 
+            if self.training and f["task_mode"] == "asr":
+                feat = self._apply_spec_augment(feat.clone())
+            proc_audio.append(feat.transpose(0, 1))
+
+        batch = {
+            "text_input_ids": torch.nn.utils.rnn.pad_sequence(
+                [f["input_ids"] for f in valid],
+                batch_first=True, 
+                padding_value=self.pad_token_id
+            ),
+            "labels": torch.nn.utils.rnn.pad_sequence([f["labels"] for f in valid], batch_first=True, padding_value=-100),
+            "audio_features": torch.nn.utils.rnn.pad_sequence(proc_audio, batch_first=True, padding_value=self.audio_pad_val).transpose(1, 2),
+            "audio_lens": torch.tensor([f.shape[0] for f in proc_audio], dtype=torch.long),
+            "task_modes": [f["task_mode"] for f in valid]
         }
+        
+        batch["attention_mask"] = (batch["text_input_ids"] != self.pad_token_id).long()
+        return batch
 
-def data_collator(features, pad_id):
-    valid_features = [f for f in features if f["audio_features"].shape[1] > 0]
-    if not valid_features: return {}
-
-    text_ids = [f["text_ids"] for f in valid_features]
-    labels = [f["labels"] for f in valid_features]
-
-    max_len = max(len(t) for t in text_ids)
-    padded_text_ids, padded_labels, text_attention_masks = [], [], []
-
-    for t, l in zip(text_ids, labels):
-        pad_len = max_len - len(t)
-        p_t = torch.cat([torch.full((pad_len,), pad_id, dtype=torch.long), t])
-        p_l = torch.cat([torch.full((pad_len,), -100, dtype=torch.long), l])
-        mask = torch.cat([torch.zeros(pad_len, dtype=torch.long), torch.ones(len(t), dtype=torch.long)])
-        padded_text_ids.append(p_t)
-        padded_labels.append(p_l)
-        text_attention_masks.append(mask)
-
-    text_input_ids = torch.stack(padded_text_ids)
-    labels_padded = torch.stack(padded_labels)
-    attention_mask = torch.stack(text_attention_masks)
-    
-    audio_features = torch.stack([f["audio_features"] for f in valid_features])
-    audio_lens = torch.tensor([f["real_audio_len"] for f in valid_features], dtype=torch.long)
-    task_modes = [f["task_mode"] for f in valid_features]
-    
-    return {
-        "text_input_ids": text_input_ids,
-        "attention_mask": attention_mask,
-        "audio_features": audio_features,
-        "audio_lens": audio_lens,
-        "labels": labels_padded,
-        "task_modes": task_modes
-    }
-
+# ---------------------------------------------------------------------
+# Trainer & Optimization
+# ---------------------------------------------------------------------
 class CalmTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.meter_tts_loss = 0.0; self.meter_tts_count = 0
-        self.meter_asr_loss = 0.0; self.meter_asr_count = 0
-        self.meter_div_loss = 0.0; self.meter_fid_loss = 0.0
-        self.eval_meters = {}
-        
-    def compute_loss(self, model, inputs, return_outputs=False):
-        outputs = model(
-            text_input_ids=inputs["text_input_ids"],
-            audio_features=inputs["audio_features"],
-            attention_mask=inputs["attention_mask"],
-            audio_lens=inputs["audio_lens"],
-            labels=inputs["labels"],
-            task_modes=inputs["task_modes"]
-        )
-        loss = outputs.loss
-        
-        if self.model.training:
-            task_modes = inputs.get("task_modes", [])
-            num_tts = task_modes.count("tts")
-            num_asr = task_modes.count("asr")
-            loss_tts = getattr(outputs, "loss_tts", torch.tensor(0.0)).item()
-            loss_asr = getattr(outputs, "loss_asr", torch.tensor(0.0)).item()
-            loss_div = getattr(outputs, "loss_diversity", torch.tensor(0.0)).item()
-            loss_fid = getattr(outputs, "loss_fidelity", torch.tensor(0.0)).item()
-
-            self.meter_tts_loss += loss_tts * num_tts
-            self.meter_tts_count += num_tts
-            self.meter_asr_loss += loss_asr * num_asr
-            self.meter_asr_count += num_asr
-            self.meter_div_loss += loss_div * num_tts
-            self.meter_fid_loss += loss_fid * num_tts
-        else:
-            task_modes = inputs.get("task_modes", [])
-            num_tts = task_modes.count("tts")
-            num_asr = task_modes.count("asr")
-            loss_tts = getattr(outputs, "loss_tts", torch.tensor(0.0)).item()
-            loss_asr = getattr(outputs, "loss_asr", torch.tensor(0.0)).item()
-            loss_div = getattr(outputs, "loss_diversity", torch.tensor(0.0)).item()
-            loss_fid = getattr(outputs, "loss_fidelity", torch.tensor(0.0)).item()
-
-            if "eval_tts_loss" not in self.eval_meters:
-                self.eval_meters = {
-                    "eval_tts_loss": 0.0, "eval_tts_count": 0,
-                    "eval_asr_loss": 0.0, "eval_asr_count": 0,
-                    "eval_div_loss": 0.0, "eval_fid_loss": 0.0
-                }
-            self.eval_meters["eval_tts_loss"] += loss_tts * num_tts
-            self.eval_meters["eval_tts_count"] += num_tts
-            self.eval_meters["eval_asr_loss"] += loss_asr * num_asr
-            self.eval_meters["eval_asr_count"] += num_asr
-            self.eval_meters["eval_div_loss"] += loss_div * num_tts
-            self.eval_meters["eval_fid_loss"] += loss_fid * num_tts
-
-        return (loss, outputs) if return_outputs else loss
-    
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
-        self.eval_meters = {}
-        output = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-        if "eval_tts_count" in self.eval_meters and self.eval_meters["eval_tts_count"] > 0:
-            count = self.eval_meters["eval_tts_count"]
-            output[f"{metric_key_prefix}_tts_loss"] = self.eval_meters["eval_tts_loss"] / count
-            output[f"{metric_key_prefix}_div_loss"] = self.eval_meters["eval_div_loss"] / count
-            output[f"{metric_key_prefix}_fid_loss"] = self.eval_meters["eval_fid_loss"] / count
-        if "eval_asr_count" in self.eval_meters and self.eval_meters["eval_asr_count"] > 0:
-            count = self.eval_meters["eval_asr_count"]
-            output[f"{metric_key_prefix}_asr_loss"] = self.eval_meters["eval_asr_loss"] / count
-        self.log(output)
-        return output
-    
-    def log(self, logs: Dict[str, float]) -> None:
-        if self.args.world_size > 1:
-            metrics = torch.tensor([
-                self.meter_tts_loss, float(self.meter_tts_count),
-                self.meter_asr_loss, float(self.meter_asr_count),
-                self.meter_div_loss, self.meter_fid_loss
-            ], device=self.args.device)
-            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-            tts_sum, tts_cnt = metrics[0].item(), metrics[1].item()
-            asr_sum, asr_cnt = metrics[2].item(), metrics[3].item()
-            div_sum, fid_sum = metrics[4].item(), metrics[5].item()
-        else:
-            tts_sum, tts_cnt = self.meter_tts_loss, self.meter_tts_count
-            asr_sum, asr_cnt = self.meter_asr_loss, self.meter_asr_count
-            div_sum, fid_sum = self.meter_div_loss, self.meter_fid_loss
-
-        logs["tts_loss"] = round(tts_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
-        logs["asr_loss"] = round(asr_sum / asr_cnt, 4) if asr_cnt > 0 else 0.0
-        logs["diversity_loss"] = round(div_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
-        logs["fidelity_loss"] = round(fid_sum / tts_cnt, 4) if tts_cnt > 0 else 0.0
-        
-        self.meter_tts_loss = 0.0; self.meter_tts_count = 0
-        self.meter_asr_loss = 0.0; self.meter_asr_count = 0
-        self.meter_div_loss = 0.0; self.meter_fid_loss = 0.0
-        super().log(logs)
+        self.loss_meters = {"tts": 0.0, "asr": 0.0, "tts_cnt": 0, "asr_cnt": 0}
 
     def create_optimizer(self):
+        """
+        Custom optimizer setup: 
+        Applies 20x Learning Rate to the Projector/Head vs the LLM Backbone.
+        """
         if self.optimizer is None:
             decay_parameters = []
             no_decay_parameters = []
             projector_parameters = []
-            head_names = ["input_proj", "output_head"]
             
-            for name, param in self.model.named_parameters():
+            head_keywords = ["input_proj", "output_head"]
+            
+            model_to_opt = self.model_wrapped if hasattr(self, "model_wrapped") else self.model
+            if hasattr(model_to_opt, "module"): model_to_opt = model_to_opt.module
+
+            for name, param in model_to_opt.named_parameters():
                 if not param.requires_grad: continue
-                is_head = any(n in name for n in head_names)
+                
+                is_head = any(k in name for k in head_keywords) and "lora" not in name
+                
                 if is_head:
                     projector_parameters.append(param)
                 else:
@@ -337,112 +245,218 @@ class CalmTrainer(Trainer):
             optimizer_grouped_parameters = [
                 {"params": decay_parameters, "weight_decay": self.args.weight_decay, "lr": self.args.learning_rate},
                 {"params": no_decay_parameters, "weight_decay": 0.0, "lr": self.args.learning_rate},
-                {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 20 * self.args.learning_rate},
+                # High LR for Projectors
+                {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 1.0 * self.args.learning_rate}, # fine-tune with 1.0x for clarity, or 20x as needed
             ]
 
-            self.optimizer = AdamW(
-                optimizer_grouped_parameters,
-                betas=(self.args.adam_beta1, self.args.adam_beta2),
-                eps=self.args.adam_epsilon,
-            )
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
-def main():
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    set_seed(training_args.seed)
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # 1. Unpack Model
+        peft_model = model.module.llm if hasattr(model, "module") else model.llm
+        raw_model = model.module if hasattr(model, "module") else model
 
-    if not training_args.ddp_find_unused_parameters:
-        training_args.ddp_find_unused_parameters = True
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_args.qwen_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eod_id
-    tokenizer.padding_side = 'left' 
+        # 2. Switch Adapter (MoA Strategy)
+        task_modes = inputs.get("task_modes", ["tts"])
+        # Majority vote determines batch adapter context
+        target_adapter = "tts" if task_modes.count("tts") >= task_modes.count("asr") else "asr"
+        
+        if hasattr(peft_model, "set_adapter"):
+            if target_adapter in peft_model.peft_config:
+                peft_model.set_adapter(target_adapter)
+        
+        # 3. Forward Pass
+        outputs = model(**inputs)
+        loss = outputs["loss"]
 
-    calm_config = QwenCALMConfig(
-        qwen_path=model_args.qwen_path,
-        vae_path=model_args.vae_path,
-        use_precomputed_latents=model_args.use_precomputed_latents,
-        latent_dim=model_args.latent_dim,
-        noise_size=model_args.noise_size,
-        num_mlp_layers=model_args.num_mlp_layers,
-        num_samples=model_args.num_samples,
-        beta=model_args.beta,
-        temperature=model_args.temperature
-    )
-    
-    bnb_config = None
-    if model_args.use_qlora:
-        print("💡 Enabling 4-bit QLoRA Quantization...")
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
+        # 4. [Ghost Gradients] DDP Deadlock Prevention
+        # Ensures all params participate in the graph
+        if self.model.training:
+            dummy_loss = sum(p.view(-1)[0] * 0.0 for p in raw_model.parameters() if p.requires_grad)
+            loss += dummy_loss
+
+        # 5. Logging
+        if self.model.training:
+             l_tts = outputs.get("loss_tts", torch.tensor(0., device=loss.device)).detach()
+             l_asr = outputs.get("loss_asr", torch.tensor(0., device=loss.device)).detach()
+             self.loss_meters["tts"] += l_tts.item()
+             self.loss_meters["asr"] += l_asr.item()
+             if l_tts > 0: self.loss_meters["tts_cnt"] += 1
+             if l_asr > 0: self.loss_meters["asr_cnt"] += 1
+
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs: Dict[str, float], *args, **kwargs):
+        t_c = max(self.loss_meters["tts_cnt"], 1)
+        a_c = max(self.loss_meters["asr_cnt"], 1)
+        logs["loss_tts"] = round(self.loss_meters["tts"] / t_c, 4)
+        logs["loss_asr"] = round(self.loss_meters["asr"] / a_c, 4)
+        self.loss_meters = {"tts": 0.0, "asr": 0.0, "tts_cnt": 0, "asr_cnt": 0}
+        super().log(logs, *args, **kwargs)
+        
+    def get_eval_dataloader(self, eval_dataset=None):
+        if eval_dataset is None:
+            eval_dataset = self.eval_dataset
+        
+        eval_collator = getattr(self, "eval_collator", None)
+        if eval_collator is None:
+            eval_collator = CalmCollator(
+                pad_token_id=self.tokenizer.pad_token_id, 
+                training=False
+            )
+        
+        return DataLoader(
+            eval_dataset,
+            batch_size=self.args.eval_batch_size,
+            collate_fn=eval_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
         )
 
-    model = QwenCALM(calm_config, quantization_config=bnb_config)
-    
-    if model_args.use_qlora:
-        print("🔧 Preparing model for k-bit training...")
-        model.llm = prepare_model_for_kbit_training(model.llm, use_gradient_checkpointing=False)
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
+def load_soft_restart_components(model, cfg, console):
+    """Loads specific components (Projector/Head) from a checkpoint."""
+    def _load(key, model_attr, name):
+        path = cfg.model.get(key, None)
+        if path and os.path.exists(path):
+            console.print(f"[green]Loading {name} from: {path}[/green]")
+            state_dict = torch.load(path, map_location="cpu")
+            # Clean keys
+            clean_sd = {k.replace(f"{name}.", "").replace(f"input_proj.", "").replace(f"output_head.", ""): v for k, v in state_dict.items()}
+            try:
+                getattr(model, model_attr).load_state_dict(clean_sd, strict=False)
+                console.print(f"[bold green]✅ {name} Loaded.[/bold green]")
+            except Exception as e:
+                console.print(f"[bold red]❌ {name} Fail: {e}[/bold red]")
+        else:
+            console.print(f"[yellow]⚠️ {name}: Random Init (Path not found)[/yellow]")
 
-    if model_args.use_lora:
+    _load("pretrained_projector_path", "input_proj", "input_proj")
+    _load("pretrained_head_path", "output_head", "output_head")
+
+# ---------------------------------------------------------------------
+# Main Execution
+# ---------------------------------------------------------------------
+@hydra.main(version_base=None, config_path="../config", config_name="calm_config")
+def main(cfg: DictConfig):
+    console.rule("[magenta]Flow-based Audio-CALM Training[/magenta]")
+    set_seed(cfg.training.seed)
+    
+    training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
+    training_args.ignore_data_skip = True
+    training_args.ddp_timeout = 10800
+    
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.qwen_path, trust_remote_code=True)
+    if tokenizer.pad_token_id is None: 
+        tokenizer.pad_token_id = tokenizer.eod_id if hasattr(tokenizer, 'eod_id') else tokenizer.eos_token_id
+    tokenizer.padding_side = "right"
+
+    # 1. Model Initialization
+    config = QwenCALMConfig(
+        qwen_path=cfg.model.qwen_path,
+        vae_path=cfg.model.vae_path,
+        head_type="flow", # Hardcoded to flow as per instructions
+        use_precomputed_latents=cfg.model.use_precomputed_latents,
+        latent_dim=cfg.model.latent_dim,
+        audio_loss_weight=cfg.model.audio_loss_weight,
+        downsample_rate=cfg.data.latent_downsample,
+    )
+    model = QwenCALM(config)
+
+    # 2. Soft Restart (Load Head/Projector)
+    console.rule("[bold cyan]Component Loading[/bold cyan]")
+    load_soft_restart_components(model, cfg, console)
+    
+    # 3. LoRA / MoA Initialization
+    if cfg.model.use_lora:
+        console.print("[blue]Initializing LoRA Config...[/blue]")
         lora_config = LoraConfig(
-            r=model_args.lora_rank,
-            lora_alpha=model_args.lora_alpha,
-            target_modules=["c_attn", "c_proj", "w1", "w2"],
-            lora_dropout=model_args.lora_dropout,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM
+            r=cfg.model.lora_rank, lora_alpha=cfg.model.lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=cfg.model.lora_dropout, bias="none", task_type=TaskType.CAUSAL_LM,
+            modules_to_save=["input_proj", "output_head"], 
         )
-        model.llm = get_peft_model(model.llm, lora_config)
-        model.llm.print_trainable_parameters()
-    
-    # [MODIFIED] Pass task_mode to Datasets
-    train_dataset = CalmDataset(
-        data_dir=data_args.mel_dir, 
-        librispeech_root=data_args.librispeech_root,
-        subsets=data_args.train_subsets,
-        tokenizer=tokenizer,
-        max_text_len=data_args.max_text_len,
-        max_audio_len=data_args.max_audio_len,
-        use_latents=model_args.use_precomputed_latents,
-        latent_downsample=data_args.latent_downsample,
-        is_eval=False,
-        task_mode=data_args.task_mode # "asr" here
-    )
+        
+        def load_adapter_if_path_exists(adapter_name, path_key):
+            path = cfg.model.get(path_key, None)
+            if path and os.path.exists(path):
+                console.print(f"[yellow]Loading {adapter_name} from {path}...[/yellow]")
+                try:
+                    if path.endswith(".safetensors"):
+                        from safetensors.torch import load_file
+                        sd = load_file(path)
+                    else:
+                        sd = torch.load(path, map_location="cpu")
+                    set_peft_model_state_dict(model.llm, sd, adapter_name=adapter_name)
+                    console.print(f"[bold green]✅ {adapter_name} loaded![/bold green]")
+                except Exception as e:
+                    console.print(f"[red]❌ Failed to load {adapter_name}: {e}[/red]")
+            else:
+                console.print(f"[dim]ℹ️  {adapter_name} initialized from scratch[/dim]")
+        
+        # Initialize Adapters based on Task Mode
+        if cfg.data.task_mode == "tts":
+            console.print("[green] -> Mode: TTS Only[/green]")
+            model.llm = get_peft_model(model.llm, lora_config, adapter_name="tts")
+            load_adapter_if_path_exists("tts", "pretrained_lora_path_tts")
+            
+        elif cfg.data.task_mode == "asr":
+            console.print("[green] -> Mode: ASR Only[/green]")
+            model.llm = get_peft_model(model.llm, lora_config, adapter_name="asr")
+            load_adapter_if_path_exists("asr", "pretrained_lora_path_asr")
+            
+        else:
+            console.print("[green] -> Mode: Mix (MoA)[/green]")
+            model.llm = get_peft_model(model.llm, lora_config, adapter_name="tts")
+            model.llm.add_adapter("asr", lora_config)
+            load_adapter_if_path_exists("tts", "pretrained_lora_path_tts")
+            load_adapter_if_path_exists("asr", "pretrained_lora_path_asr")
 
-    eval_dir = data_args.eval_mel_dir if data_args.eval_mel_dir else data_args.mel_dir
-    eval_dataset = CalmDataset(
-        data_dir=eval_dir,
-        librispeech_root=data_args.librispeech_root,
-        subsets=data_args.eval_subsets,
-        tokenizer=tokenizer,
-        max_text_len=data_args.max_text_len,
-        max_audio_len=data_args.max_audio_len,
-        use_latents=model_args.use_precomputed_latents,
-        latent_downsample=data_args.latent_downsample,
-        is_eval=True,
-        task_mode=data_args.task_mode # Consistent with train
+    # 4. Freeze Strategy
+    should_freeze_proj = cfg.model.get("freeze_projector", False)
+    model.input_proj.requires_grad_(not should_freeze_proj)
+    model.output_head.requires_grad_(True)
+    
+    for n, p in model.llm.named_parameters():
+        if "lora_" in n: p.requires_grad = True
+
+    console.rule()
+
+    # 5. Trainer Setup
+    train_ds = CalmDataset(
+        cfg.data.mel_dir, cfg.data.librispeech_root, cfg.data.train_subsets, 
+        tokenizer, cfg.data.max_text_len, cfg.data.max_audio_len, 
+        cfg.model.use_precomputed_latents, cfg.data.task_mode, cfg.data.task_prob_tts
+    )
+    eval_ds = CalmDataset(
+        cfg.data.eval_mel_dir or cfg.data.mel_dir, cfg.data.librispeech_root, 
+        cfg.data.eval_subsets, tokenizer, cfg.data.max_text_len, 
+        cfg.data.max_audio_len, cfg.model.use_precomputed_latents, 
+        cfg.data.task_mode, cfg.data.task_prob_tts
     )
     
+    train_collator = CalmCollator(tokenizer.pad_token_id, training=True)
+    eval_collator = CalmCollator(tokenizer.pad_token_id, training=False)
+
     trainer = CalmTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        data_collator=partial(data_collator, pad_id=tokenizer.pad_token_id)
+        model=model, args=training_args,
+        train_dataset=train_ds, eval_dataset=eval_ds,
+        data_collator=train_collator
     )
     
+    trainer.eval_collator = eval_collator
+    trainer.tokenizer = tokenizer
+
     if training_args.resume_from_checkpoint:
         trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     else:
         trainer.train()
-        
+    
     trainer.save_model(training_args.output_dir)
-    model.save_pretrained(training_args.output_dir)
 
 if __name__ == "__main__":
     main()

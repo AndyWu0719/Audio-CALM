@@ -24,43 +24,56 @@ def check_latents(data_dir, num_files=None):
 
     print(f"Found {len(files)} files. Starting check...")
     
-    # 如果文件太多，可以限制检查的数量用于快速验证
     if num_files is not None and num_files > 0:
         files = files[:num_files]
         print(f"Checking first {num_files} files...")
 
-    total_mean = 0.0
-    total_var = 0.0
     global_min = float('inf')
     global_max = float('-inf')
-    total_elements = 0
     
     nan_count = 0
     inf_count = 0
-
-    # 为了避免爆内存，使用 Welford 算法或简单的累加统计（这里用简单的 Batch 统计近似）
-    # 或者收集所有文件的 min/max/mean 做分布概览
     
     file_means = []
     file_stds = []
 
     for fpath in tqdm(files):
         try:
-            # 加载 Latent
-            latent = torch.load(fpath, map_location="cpu") # Shape expected: [Dim, Time]
+            # 1. 加载数据
+            payload = torch.load(fpath, map_location="cpu")
             
-            # 转换为 float 以防精度溢出
+            # 2. [关键修复] 兼容字典格式
+            if isinstance(payload, dict):
+                # 尝试获取 'latent' 或 'mel'
+                if "latent" in payload:
+                    latent = payload["latent"]
+                elif "mel" in payload:
+                    latent = payload["mel"]
+                else:
+                    # 如果都不在，打印所有的 key 看看是什么
+                    print(f"[Skip] File {os.path.basename(fpath)} is a dict but has unknown keys: {list(payload.keys())}")
+                    continue
+            else:
+                latent = payload
+
+            # 3. 确保是 Tensor 并且转换为 float
+            if not isinstance(latent, torch.Tensor):
+                print(f"[Skip] Content in {os.path.basename(fpath)} is not a Tensor (got {type(latent)})")
+                continue
+                
             latent = latent.float()
             
-            # 1. 检查 NaN / Inf
+            # 4. 检查 NaN / Inf
             if torch.isnan(latent).any():
                 print(f"[WARNING] NaN found in {fpath}")
                 nan_count += 1
+                continue # 跳过坏数据，不计入统计
             if torch.isinf(latent).any():
                 print(f"[WARNING] Inf found in {fpath}")
                 inf_count += 1
-                
-            # 2. 统计数值
+                continue
+
+            # 5. 统计数值
             l_min = latent.min().item()
             l_max = latent.max().item()
             l_mean = latent.mean().item()
@@ -76,29 +89,45 @@ def check_latents(data_dir, num_files=None):
             print(f"[Error] Failed to load {fpath}: {e}")
 
     # 汇总结果
+    if len(file_means) == 0:
+        print("\n[Error] No valid latents were processed.")
+        return
+
+    avg_mean = np.mean(file_means)
+    avg_std = np.mean(file_stds)
+
     print("\n" + "="*40)
     print("Latent Distribution Summary")
     print("="*40)
-    print(f"Total Files Checked: {len(files)}")
-    print(f"Global Min: {global_min:.4f}")
-    print(f"Global Max: {global_max:.4f}")
-    print(f"Average Mean: {np.mean(file_means):.4f} (across files)")
-    print(f"Average Std : {np.mean(file_stds):.4f} (across files)")
+    print(f"Total Valid Files : {len(file_means)}")
+    print(f"Global Min        : {global_min:.4f}")
+    print(f"Global Max        : {global_max:.4f}")
+    print(f"Average Mean      : {avg_mean:.4f} (Should be close to 0)")
+    print(f"Average Std       : {avg_std:.4f}  (Should be close to 1)")
     print("-" * 40)
-    print(f"Files with NaN: {nan_count}")
-    print(f"Files with Inf: {inf_count}")
+    print(f"Files with NaN    : {nan_count}")
+    print(f"Files with Inf    : {inf_count}")
     print("="*40)
 
-    # 简单的直方图建议
-    if np.abs(np.mean(file_means)) > 1.0:
-        print("[Suggestion] Latents are not centered at 0. Consider normalization if using GMM/Diffusion.")
-    if np.abs(global_max) > 20.0 or np.abs(global_min) > 20.0:
-        print("[Suggestion] Latent values are quite large. Check if this is expected for your VAE.")
+    # 诊断建议
+    if avg_std < 0.5:
+        scale_factor = 1.0 / avg_std
+        print(f"\n⚠️  [DIAGNOSIS] Variance is too SMALL ({avg_std:.4f}).")
+        print(f"👉 Suggestion: Multiply latents by {scale_factor:.4f} during training.")
+    elif avg_std > 2.0:
+        scale_factor = 1.0 / avg_std
+        print(f"\n⚠️  [DIAGNOSIS] Variance is too LARGE ({avg_std:.4f}).")
+        print(f"👉 Suggestion: Multiply latents by {scale_factor:.4f} during training.")
+    elif abs(avg_mean) > 0.5:
+        print(f"\n⚠️  [DIAGNOSIS] Data is not centered (Mean={avg_mean:.4f}).")
+        print(f"👉 Suggestion: Subtract {avg_mean:.4f} during training.")
+    else:
+        print(f"\n✅ [DIAGNOSIS] Data distribution looks healthy!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True, help="Path to the directory containing .pt latent files")
-    parser.add_argument("--num_files", type=int, default=None, help="Number of files to check (default: all)")
+    parser.add_argument("--num_files", type=int, default=1000, help="Number of files to check (default: 1000)")
     
     args = parser.parse_args()
     
