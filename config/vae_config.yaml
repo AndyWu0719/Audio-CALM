@@ -18,7 +18,8 @@ model:
   norm_num_groups: 32
 
 data:
-  data_dir: "${hydra:runtime.cwd}/data/mel_features"
+  data_dir: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/train"
+  eval_data_dir: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/dev-clean"
   train_subsets: "train-clean-100,train-clean-360,train-other-500"
   eval_subsets: "dev-clean"
   crop_size: 512

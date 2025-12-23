@@ -135,11 +135,11 @@ training:
 # EVALUATION CONFIGURATION
 # -------------------------------------------------------------------
 evaluation:
-  task: "asr"
-  test_file: "${hydra:runtime.cwd}/data/latents_jsonl/dev_clean_latent.jsonl"
+  task: "tts"
+  test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl"
   
   # Inference Checkpoint
-  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-6594"
+  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4/checkpoint-8316"
   output_dir: "${hydra:runtime.cwd}/outputs/eval_results_moa"
   
   # Generation Parameters
@@ -155,3 +155,4 @@ evaluation:
   wandb_project: "Audio-CALM-VAE"
   wandb_entity: null
   web_demo: False
+  seed: 42

@@ -312,3 +312,387 @@
 [2025-12-21 21:14:27,380][eval][INFO] - Loaded output_head.
 [2025-12-21 21:14:32,579][eval][INFO] - >>> Starting ASR Evaluation
 [2025-12-21 21:15:26,543][eval][INFO] - 🔥 ASR Evaluation Complete. Global WER: 0.1317
+[2025-12-24 04:53:18,751][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-24 04:53:20,637][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-24 04:53:22,070][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4/checkpoint-8316...
+[2025-12-24 04:53:22,071][eval][INFO] - Found multiple adapters (MoA).
+[2025-12-24 04:53:22,071][eval][INFO] - Loading TTS adapter from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4/checkpoint-8316/tts
+[2025-12-24 04:53:26,503][eval][INFO] - Loaded input_proj.
+[2025-12-24 04:53:26,709][eval][INFO] - Loaded output_head.
+[2025-12-24 04:53:48,585][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-24 04:53:48,616][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-24 04:53:48,617][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-24 04:53:48,617][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-24 04:53:48,617][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-24 04:53:48,638][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [disable_jit_profiling, allow_tf32]
+[2025-12-24 04:53:48,639][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-24 04:53:48,640][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-24 04:53:48,640][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-24 04:53:48,652][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-24 04:53:48,652][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 04:53:49,095][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-24 04:53:49,095][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-24 04:53:49,096][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-24 04:53:49,096][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-24 04:53:49,096][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-24 04:53:49,877][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-24 04:53:49,878][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-24 04:53:49,878][eval][WARNING] - Could not find latent for oracle test.
+[2025-12-24 04:54:17,935][eval][ERROR] - TTS Failed on sample 0: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 04:54:41,255][eval][ERROR] - TTS Failed on sample 1: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 04:55:04,577][eval][ERROR] - TTS Failed on sample 2: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 04:55:27,819][eval][ERROR] - TTS Failed on sample 3: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 04:55:45,115][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,115][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,118][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,118][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,119][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,120][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,120][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,121][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,121][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,122][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,125][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,125][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,125][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,125][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,126][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,126][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,126][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:55:45,126][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 04:57:45,810][eval][INFO] - Mode: tts (TTS=True, ASR=False)
+[2025-12-24 04:57:47,759][eval][INFO] - Loading base model from /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct...
+[2025-12-24 04:57:49,043][eval][INFO] - Loading weights from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4/checkpoint-8316...
+[2025-12-24 04:57:49,043][eval][INFO] - Found multiple adapters (MoA).
+[2025-12-24 04:57:49,044][eval][INFO] - Loading TTS adapter from /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4/checkpoint-8316/tts
+[2025-12-24 04:57:52,533][eval][INFO] - Loaded input_proj.
+[2025-12-24 04:57:52,602][eval][INFO] - Loaded output_head.
+[2025-12-24 04:57:56,056][eval][INFO] - Loading vocoder from speechbrain/tts-hifigan-libritts-16kHz...
+[2025-12-24 04:57:56,077][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-24 04:57:56,077][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-24 04:57:56,077][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-24 04:57:56,078][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-24 04:57:56,098][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+[2025-12-24 04:57:56,098][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-24 04:57:56,099][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-24 04:57:56,099][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-24 04:57:56,108][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/hyperparams.yaml'
+[2025-12-24 04:57:56,109][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 04:57:56,516][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan_checkpoints.
+[2025-12-24 04:57:56,517][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt'
+[2025-12-24 04:57:56,517][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-24 04:57:56,517][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-24 04:57:56,517][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan_checkpoints/generator.ckpt
+[2025-12-24 04:57:57,257][eval][INFO] - >>> Starting TTS Evaluation
+[2025-12-24 04:57:57,257][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-24 04:57:57,258][eval][WARNING] - Could not find latent for oracle test.
+[2025-12-24 04:58:24,779][eval][ERROR] - TTS Failed on sample 0: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 04:58:48,055][eval][ERROR] - TTS Failed on sample 1: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 04:59:52,610][eval][INFO] - 🤖 Loading Model: /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct
+[2025-12-24 04:59:54,079][eval][INFO] - Detected Mixture of Adapters (MoA).
+[2025-12-24 04:59:57,134][eval][INFO] - Loaded input_proj.
+[2025-12-24 04:59:57,203][eval][INFO] - Loaded output_head.
+[2025-12-24 05:00:00,363][eval][INFO] - Subsampling 50 from 8439 total samples.
+[2025-12-24 05:00:00,590][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-24 05:00:00,590][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-24 05:00:00,591][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-24 05:00:00,591][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-24 05:00:00,610][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [disable_jit_profiling, allow_tf32]
+[2025-12-24 05:00:00,610][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-24 05:00:00,611][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-24 05:00:00,611][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-24 05:00:00,620][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 05:00:00,913][speechbrain.utils.fetching][DEBUG] - Fetch: Local file found, creating symlink '/home/andywu/.cache/huggingface/hub/models--speechbrain--tts-hifigan-libritts-16kHz/snapshots/4d32c6f19e7ff9316c5c56d7903d3d345ddcace4/hyperparams.yaml' -> '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/hyperparams.yaml'
+[2025-12-24 05:00:00,914][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 05:00:01,264][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan.
+[2025-12-24 05:00:01,265][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 05:00:01,551][speechbrain.utils.fetching][DEBUG] - Fetch: Local file found, creating symlink '/home/andywu/.cache/huggingface/hub/models--speechbrain--tts-hifigan-libritts-16kHz/snapshots/4d32c6f19e7ff9316c5c56d7903d3d345ddcace4/generator.ckpt' -> '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt'
+[2025-12-24 05:00:01,551][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt
+[2025-12-24 05:00:01,551][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-24 05:00:01,552][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt
+[2025-12-24 05:00:01,615][eval][INFO] - Loading ASR Metric Model: openai/whisper-tiny.en
+[2025-12-24 05:00:03,441][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-24 05:00:03,570][eval][ERROR] - Oracle test failed: Input type (c10::BFloat16) and bias type (float) should be the same
+[2025-12-24 05:00:27,627][eval][ERROR] - Error on sample 0: Input type (float) and bias type (c10::BFloat16) should be the same
+[2025-12-24 05:00:36,447][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,447][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,449][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,450][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,451][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,454][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,454][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,455][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,455][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,455][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,455][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,455][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,458][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,459][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:00:36,460][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:02:53,246][eval][INFO] - 🤖 Loading Model: /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct
+[2025-12-24 05:02:54,714][eval][INFO] - Detected Mixture of Adapters (MoA).
+[2025-12-24 05:02:57,845][eval][INFO] - Loaded input_proj.
+[2025-12-24 05:02:57,912][eval][INFO] - Loaded output_head.
+[2025-12-24 05:03:01,087][eval][INFO] - Model set to BF16 (VAE kept in FP32).
+[2025-12-24 05:03:01,112][eval][INFO] - Subsampling 50 from 8439 total samples.
+[2025-12-24 05:03:01,385][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-24 05:03:01,386][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-24 05:03:01,386][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-24 05:03:01,386][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-24 05:03:01,406][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+[2025-12-24 05:03:01,406][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-24 05:03:01,407][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-24 05:03:01,407][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-24 05:03:01,417][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/hyperparams.yaml'
+[2025-12-24 05:03:01,417][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 05:03:01,803][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan.
+[2025-12-24 05:03:01,804][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt'
+[2025-12-24 05:03:01,804][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt
+[2025-12-24 05:03:01,804][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-24 05:03:01,804][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt
+[2025-12-24 05:03:01,856][eval][INFO] - Loading ASR Metric Model: openai/whisper-tiny.en
+[2025-12-24 05:03:03,658][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-24 05:03:03,864][eval][INFO] - ✅ Oracle test saved to /data0/determined/users/andywu/Audio-CALM-v2/outputs/eval_results_moa/eval-flow-tts-checkpoint-5000/oracle_test.
+[2025-12-24 05:03:27,936][eval][ERROR] - Error on sample 0: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 05:03:39,882][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,883][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,885][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,885][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,890][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,890][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,890][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,890][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,890][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,890][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,892][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,894][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,894][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,894][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,894][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,894][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,894][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:39,895][asyncio][WARNING] - socket.send() raised exception.
+[2025-12-24 05:03:54,295][eval][INFO] - 🤖 Loading Model: /data0/determined/users/andywu/Audio-CALM-v2/qwen2_7B_Instruct
+[2025-12-24 05:03:55,607][eval][INFO] - Detected Mixture of Adapters (MoA).
+[2025-12-24 05:03:58,899][eval][INFO] - Loaded input_proj.
+[2025-12-24 05:03:58,985][eval][INFO] - Loaded output_head.
+[2025-12-24 05:04:02,217][eval][INFO] - Model set to BF16 (VAE kept in FP32).
+[2025-12-24 05:04:02,243][eval][INFO] - Subsampling 50 from 8439 total samples.
+[2025-12-24 05:04:02,270][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _speechbrain_save
+[2025-12-24 05:04:02,270][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _speechbrain_load
+[2025-12-24 05:04:02,270][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for save
+[2025-12-24 05:04:02,271][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for load
+[2025-12-24 05:04:02,301][speechbrain.utils.quirks][INFO] - Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+[2025-12-24 05:04:02,302][speechbrain.utils.quirks][INFO] - Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+[2025-12-24 05:04:02,303][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint save hook for _save
+[2025-12-24 05:04:02,303][speechbrain.utils.checkpoints][DEBUG] - Registered checkpoint load hook for _recover
+[2025-12-24 05:04:02,313][speechbrain.utils.fetching][INFO] - Fetch hyperparams.yaml: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/hyperparams.yaml'
+[2025-12-24 05:04:02,313][speechbrain.utils.fetching][INFO] - Fetch custom.py: Fetching from HuggingFace Hub 'speechbrain/tts-hifigan-libritts-16kHz' if not cached
+[2025-12-24 05:04:02,710][speechbrain.utils.parameter_transfer][DEBUG] - Collecting files (or symlinks) for pretraining in tmp_hifigan.
+[2025-12-24 05:04:02,711][speechbrain.utils.fetching][INFO] - Fetch generator.ckpt: Using symlink found at '/data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt'
+[2025-12-24 05:04:02,711][speechbrain.utils.parameter_transfer][DEBUG] - Set local path in self.paths["generator"] = /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt
+[2025-12-24 05:04:02,711][speechbrain.utils.parameter_transfer][INFO] - Loading pretrained files for: generator
+[2025-12-24 05:04:02,711][speechbrain.utils.parameter_transfer][DEBUG] - Redirecting (loading from local path): generator -> /data0/determined/users/andywu/Audio-CALM-v2/tmp_hifigan/generator.ckpt
+[2025-12-24 05:04:02,759][eval][INFO] - Loading ASR Metric Model: openai/whisper-tiny.en
+[2025-12-24 05:04:04,705][eval][INFO] - 🧪 Running Oracle Reconstruction Test...
+[2025-12-24 05:04:04,913][eval][INFO] - ✅ Oracle test saved to /data0/determined/users/andywu/Audio-CALM-v2/outputs/eval_results_moa/eval-flow-tts-checkpoint-5000/oracle_test.
+[2025-12-24 05:04:28,972][eval][ERROR] - Error on sample 0: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 05:04:51,862][eval][ERROR] - Error on sample 1: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 05:05:14,774][eval][ERROR] - Error on sample 2: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
+[2025-12-24 05:05:37,699][eval][ERROR] - Error on sample 3: Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8. On Windows, ensure you've installed
+             the "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.5.1+cu124) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8: libavutil.so.60: cannot open shared object file: No such file or directory
+FFmpeg version 7: libavutil.so.59: cannot open shared object file: No such file or directory
+FFmpeg version 6: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core6.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+FFmpeg version 5: libavutil.so.57: cannot open shared object file: No such file or directory
+FFmpeg version 4: /data0/determined/users/andywu/config/.conda/envs/qwen2_CALM/lib/python3.10/site-packages/torchcodec/libtorchcodec_core4.so: undefined symbol: _ZNK3c106Device3strB5cxx11Ev
+[end of libtorchcodec loading traceback].
