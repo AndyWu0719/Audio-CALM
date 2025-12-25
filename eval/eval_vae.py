@@ -16,7 +16,7 @@ console = Console()
 sys.path.append(os.getcwd())
 
 from models.modeling_vae import AcousticVAE
-from preprocess.prepare_mel import MelExtractor
+from preprocess.core import MelExtractor
 
 # 尝试导入 HiFiGAN (保持原有兼容性)
 try:

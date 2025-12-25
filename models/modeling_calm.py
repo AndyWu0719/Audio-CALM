@@ -1,6 +1,7 @@
 """
 Flow-based Audio-CALM: Qwen-based Multimodal Model.
-Features: PyTorch SDPA, Flow Matching Head, ASR-Optimized Linear Projector, and CTC Auxiliary Loss.
+Features: PyTorch SDPA/FlashAttn2, Flow Matching Head, ASR-Optimized Linear Projector.
+FIXED: Native support for inference offset (No Monkey Patch needed).
 """
 
 import os
@@ -12,12 +13,7 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PretrainedConfig
 from models.modeling_vae import AcousticVAE
 
 # ---------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------
-EPS = 1e-8
-
-# ---------------------------------------------------------------------
-# Audio Input Projector (ASR Optimized)
+# Audio Input Projector (ASR Optimized + Inference Fix)
 # ---------------------------------------------------------------------
 class AudioInputProjector(nn.Module):
     """
@@ -48,8 +44,16 @@ class AudioInputProjector(nn.Module):
             ) for _ in range(2)
         ])
         self.post_norm = nn.LayerNorm(llm_dim, eps=1e-6)
+        
+        # Init weights slightly better
+        nn.init.normal_(self.pos_emb.weight, mean=0.0, std=0.02)
 
-    def forward(self, x):
+    def forward(self, x, offset=0):
+        """
+        Args:
+            x: [Batch, Time, Dim]
+            offset: (int) Starting position index. Crucial for auto-regressive inference.
+        """
         # x: [Batch, Time, Dim]
         B, T, _ = x.shape
         device = x.device
@@ -59,17 +63,16 @@ class AudioInputProjector(nn.Module):
         x = self.conv_block(x)
         x = x.transpose(1, 2)
         
-        # Step B: Inject Positional Embeddings
-        T_clamped = min(T, self.max_audio_len)
-        pos_ids = torch.arange(T_clamped, device=device).unsqueeze(0).expand(B, -1)
+        # Step B: Inject Positional Embeddings (FIXED for Inference)
+        # Calculate start and end based on offset
+        start = offset
+        end = offset + T
+        
+        # Clamp to avoid index out of bounds during extremely long generation
+        pos_ids = torch.arange(start, end, device=device).clamp(max=self.max_audio_len - 1).unsqueeze(0).expand(B, -1)
+        
         pos_emb_val = self.pos_emb(pos_ids)
-
-        if T > self.max_audio_len:
-            pos_emb_full = torch.zeros(B, T, x.size(-1), device=device, dtype=x.dtype)
-            pos_emb_full[:, :T_clamped, :] = pos_emb_val
-            x = x + pos_emb_full
-        else:
-            x = x + pos_emb_val
+        x = x + pos_emb_val
             
         # Step C: Deep Mixing
         for block in self.blocks:
@@ -112,7 +115,7 @@ class FlowMatchingHead(nn.Module):
         ])
         self.out_proj = nn.Linear(hidden_dim, output_dim)
         
-        # Zero initialization for stability
+        # Zero initialization for stability (Crucial for Flow Matching)
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
@@ -154,6 +157,8 @@ def compute_flow_loss(model_head, condition, target_latent, mask, cfg_dropout_pr
     t = torch.rand(B, device=device, dtype=dtype).unsqueeze(1).expand(-1, T)
     x0 = torch.randn_like(target_latent)
     x1 = target_latent
+    
+    # Linear Interpolation (Optimal Transport Path)
     xt = (1 - t.unsqueeze(-1)) * x0 + t.unsqueeze(-1) * x1
     target_v = x1 - x0
     
@@ -197,12 +202,14 @@ class QwenCALM(PreTrainedModel):
         # 1. Load LLM Backbone
         print(f"Loading Qwen from {config.qwen_path}...")
         try:
-            attn_impl = "flash_attention_2"
+            # Try efficient attention first
             import flash_attn
-            print(f"✅ Flash Attention 2 found, using it for attention implementation.")
+            attn_impl = "flash_attention_2"
+            print(f"✅ Flash Attention 2 found.")
         except ImportError:
             print("⚠️ Flash Attention 2 not found, falling back to SDPA.")
             attn_impl = "sdpa"
+            
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, trust_remote_code=True, 
             torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, 
@@ -277,6 +284,9 @@ class QwenCALM(PreTrainedModel):
             audio_mask = torch.ones((B_aud, T_aud), device=device, dtype=torch.long)
 
         gt_latents = gt_latents.to(dtype=self.llm.dtype)
+        
+        # Audio Embedding
+        # Note: input_proj now supports offset, but for training we pass full sequence, so default offset=0 is correct
         audio_embeds = self.input_proj(gt_latents) 
         
         if self.training and self.llm.is_gradient_checkpointing:
@@ -302,14 +312,20 @@ class QwenCALM(PreTrainedModel):
             
             idx = torch.tensor(tts_indices, device=device)
             # Concatenate Text + Audio (Latent Conditioning)
+            # Input: [Text, Audio[:-1]] -> Predicts Audio[1:] (and Audio[0] from Text)
             inp = torch.cat([text_embeds[idx], audio_embeds[idx][:, :-1, :]], dim=1)
             full_mask = torch.cat([attention_mask[idx], audio_mask[idx][:, :-1]], dim=1)
+            
+            # Position IDs logic handles the concatenation timeline
             pos_ids = full_mask.long().cumsum(-1) - 1
             pos_ids.masked_fill_(full_mask == 0, 1)
 
             out = self.llm(inputs_embeds=inp, attention_mask=full_mask, position_ids=pos_ids, output_hidden_states=True)
             
             # Extract Audio Output
+            # We want the outputs corresponding to the text (predicting first audio frame) 
+            # and the audio frames (predicting next audio frames).
+            # The slicing starts from the last text token.
             audio_hidden = out.hidden_states[-1][:, text_embeds[idx].shape[1]-1 :, :]
             tts_mask = audio_mask[idx][:, : gt_latents.size(1)].bool()
             
@@ -350,11 +366,10 @@ class QwenCALM(PreTrainedModel):
             # CTC Auxiliary Loss
             ctc_loss = torch.tensor(0.0, device=device)
             if getattr(self, "ctc_head", None) is not None and self.config.ctc_loss_weight > 0:
-                ctc_input = sub_audio # [Time, Batch, Vocab]
-                ctc_logits = self.ctc_head(ctc_input).transpose(0, 1) # [T, B, Vocab]
+                ctc_input = sub_audio 
+                ctc_logits = self.ctc_head(ctc_input).transpose(0, 1)
                 ctc_log_probs = F.log_softmax(ctc_logits.float(), dim=-1)
                 
-                # Prepare CTC Targets (Filter -100 padding)
                 target_list = []
                 target_lengths = []
                 raw_labels = labels[idx]

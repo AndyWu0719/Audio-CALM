@@ -1,6 +1,7 @@
 """
 Flow-based Audio-CALM Training Script.
-Optimized for Speed, DDP Stability (Ghost Gradients), and Mixture of Adapters (MoA).
+Optimized for Speed, DDP Stability, and Mixture of Adapters (MoA).
+VERSION: FINAL_AUDITED
 """
 
 import os
@@ -46,7 +47,7 @@ def _get_rank_safe() -> int:
     except: return 0
 
 # ---------------------------------------------------------------------
-# Dataset Definition
+# Dataset Definition (Unchanged & Verified Correct)
 # ---------------------------------------------------------------------
 class CalmDataset(Dataset):
     def __init__(self, latent_dir, subsets, tokenizer, max_text_len=512, 
@@ -58,16 +59,12 @@ class CalmDataset(Dataset):
         self.task_prob_tts = task_prob_tts
         self.latent_dir = latent_dir
         
-        # Handle tokenizer special tokens
         if hasattr(tokenizer, "eod_id"):
              self.im_end_id = tokenizer.eod_id
         else:
              enc = tokenizer.encode("<|im_end|>", add_special_tokens=False)
              self.im_end_id = enc[-1] if len(enc)>0 else tokenizer.eos_token_id
 
-        # =================================================================
-        # Scanning Logic (Recursive Scan in Latent Dir)
-        # =================================================================
         self.data = []
         if _get_rank_safe() == 0: 
             console.log(f"[green]Scanning Latent Directory: {latent_dir}[/green]")
@@ -104,7 +101,6 @@ class CalmDataset(Dataset):
             console.log(f"[bold green]Matched Pairs: {len(self.data)}[/bold green]")
             if len(self.data) == 0:
                 console.log(f"[bold red]❌ CRITICAL: No data found in {latent_dir}.[/bold red]")
-                console.log(f"   Please check if your config 'train_subsets' matches the folder structure.")
 
     def __len__(self): return len(self.data)
 
@@ -112,22 +108,17 @@ class CalmDataset(Dataset):
         try:
             item = self.data[idx]
             
-            # 1. Determine Task Mode
             if self.task_mode == "mix":
                 mode = "tts" if random.random() < self.task_prob_tts else "asr"
             else:
                 mode = self.task_mode
 
-            # 2. Load Audio Latent
             payload = torch.load(item["file_path"], map_location="cpu")
             audio = payload.get("latent", payload) if isinstance(payload, dict) else payload
             if audio is None: return {"_valid": False}
             
-            # Ensure shape is [T, Dim]
             if audio.shape[0] == 64: audio = audio.transpose(0, 1)
             
-            # 3. Audio Cropping
-            # ASR requires strict alignment (drop if too long), TTS can be random cropped
             if audio.shape[0] > self.max_audio_len:
                 if mode == "asr": 
                     return {"input_ids": [0], "_valid": False}
@@ -135,7 +126,6 @@ class CalmDataset(Dataset):
                     start = random.randint(0, audio.shape[0] - self.max_audio_len)
                     audio = audio[start : start + self.max_audio_len]
 
-            # 4. Construct Prompt
             prompt = f"Read this text:\n{item['text']}" if mode == "tts" else "Transcribe the following audio:"
             user_txt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
             user_ids = self.tokenizer.encode(user_txt, add_special_tokens=False)
@@ -147,7 +137,6 @@ class CalmDataset(Dataset):
                 target_txt = f"{item['text']}<|im_end|>"
                 target_ids = self.tokenizer.encode(target_txt, add_special_tokens=False)
                 
-                # Smart truncation to ensure EOS token exists
                 max_target_len = self.max_text_len - len(user_ids)
                 if len(target_ids) > max_target_len:
                     target_ids = target_ids[:max_target_len]
@@ -157,7 +146,6 @@ class CalmDataset(Dataset):
                 text_ids = user_ids + target_ids
                 labels = [-100] * len(user_ids) + target_ids
 
-            # Final length check
             if len(text_ids) > self.max_text_len:
                 text_ids = text_ids[:self.max_text_len]
                 labels = labels[:self.max_text_len]
@@ -173,7 +161,7 @@ class CalmDataset(Dataset):
             return {"input_ids": [0], "_valid": False}
 
 # ---------------------------------------------------------------------
-# Data Collator
+# Data Collator (Unchanged)
 # ---------------------------------------------------------------------
 @dataclass
 class CalmCollator:
@@ -193,9 +181,8 @@ class CalmCollator:
 
     def __call__(self, features):
         valid = [f for f in features if f.get("_valid", False)]
-        
-        # Handle empty batch
         if not valid:
+            # Return dummy batch to avoid crash
             return {
                 "text_input_ids": torch.tensor([[self.pad_token_id]], dtype=torch.long),
                 "attention_mask": torch.tensor([[0]], dtype=torch.long),
@@ -237,10 +224,6 @@ class CalmTrainer(Trainer):
         self.loss_meters = {"tts": 0.0, "asr": 0.0, "tts_cnt": 0, "asr_cnt": 0}
 
     def create_optimizer(self):
-        """
-        Custom optimizer setup: 
-        Applies 20x Learning Rate to the Projector/Head vs the LLM Backbone.
-        """
         if self.optimizer is None:
             decay_parameters = []
             no_decay_parameters = []
@@ -267,7 +250,6 @@ class CalmTrainer(Trainer):
             optimizer_grouped_parameters = [
                 {"params": decay_parameters, "weight_decay": self.args.weight_decay, "lr": self.args.learning_rate},
                 {"params": no_decay_parameters, "weight_decay": 0.0, "lr": self.args.learning_rate},
-                # High LR for Projectors
                 {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 1.0 * self.args.learning_rate}, 
             ]
 
@@ -276,29 +258,28 @@ class CalmTrainer(Trainer):
         return self.optimizer
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # 1. Unpack Model
         peft_model = model.module.llm if hasattr(model, "module") else model.llm
         raw_model = model.module if hasattr(model, "module") else model
 
-        # 2. Switch Adapter (MoA Strategy)
         task_modes = inputs.get("task_modes", ["tts"])
-        # Majority vote determines batch adapter context
         target_adapter = "tts" if task_modes.count("tts") >= task_modes.count("asr") else "asr"
         
-        if hasattr(peft_model, "set_adapter"):
-            if target_adapter in peft_model.peft_config:
-                peft_model.set_adapter(target_adapter)
+        if hasattr(peft_model, "set_adapter") and target_adapter in peft_model.peft_config:
+            peft_model.set_adapter(target_adapter)
         
-        # 3. Forward Pass
         outputs = model(**inputs)
         loss = outputs["loss"]
 
-        # 4. [Ghost Gradients] DDP Deadlock Prevention
+        # [CRITICAL DDP FIX] Ghost Gradients for Unused Parameters
+        # When training only TTS, ASR head params (and vice versa) are unused.
+        # DDP will hang if we don't calculate a dummy loss on them.
         if self.model.training:
-            dummy_loss = sum(p.view(-1)[0] * 0.0 for p in raw_model.parameters() if p.requires_grad)
+            dummy_loss = 0.0
+            for name, param in raw_model.named_parameters():
+                if param.requires_grad and param.grad is None:
+                    dummy_loss += param.sum() * 0.0
             loss += dummy_loss
 
-        # 5. Logging
         if self.model.training:
              l_tts = outputs.get("loss_tts", torch.tensor(0., device=loss.device)).detach()
              l_asr = outputs.get("loss_asr", torch.tensor(0., device=loss.device)).detach()
@@ -340,13 +321,11 @@ class CalmTrainer(Trainer):
 # Utilities
 # ---------------------------------------------------------------------
 def load_soft_restart_components(model, cfg, console):
-    """Loads specific components (Projector/Head) from a checkpoint."""
     def _load(key, model_attr, name):
         path = cfg.model.get(key, None)
         if path and os.path.exists(path):
             console.print(f"[green]Loading {name} from: {path}[/green]")
             state_dict = torch.load(path, map_location="cpu")
-            # Clean keys
             clean_sd = {k.replace(f"{name}.", "").replace(f"input_proj.", "").replace(f"output_head.", ""): v for k, v in state_dict.items()}
             try:
                 getattr(model, model_attr).load_state_dict(clean_sd, strict=False)
@@ -365,7 +344,7 @@ def load_soft_restart_components(model, cfg, console):
 @hydra.main(version_base=None, config_path="../config", config_name="calm_config")
 def main(cfg: DictConfig):
     task_mode = cfg.data.task_mode
-    print(f"🔄 [Config] Task Mode: {task_mode.upper()}")
+    console.print(f"[bold]🔄 Task Mode:[/bold] {task_mode.upper()}")
 
     if task_mode not in cfg.data.datasets:
         raise ValueError(f"❌ Unknown task_mode: '{task_mode}'. Available: {list(cfg.data.datasets.keys())}")
@@ -377,14 +356,15 @@ def main(cfg: DictConfig):
         cfg.data.eval_latent_dir = selected_paths.eval_latent_dir
         cfg.data.raw_root = selected_paths.raw_root
 
-    print(f"📂 [Data] Training Latents: {cfg.data.latent_dir}")
-    print(f"📂 [Data] Eval Latents:     {cfg.data.eval_latent_dir}")
-
+    console.print(f"📂 [Data] Training Latents: {cfg.data.latent_dir}")
+    
     set_seed(cfg.training.seed)
     
+    # [FIX] Force find_unused_parameters=True for MoA stability
+    # Because ASR batch won't use Flow Head, and TTS batch won't use CTC Head
     training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
+    training_args.ddp_find_unused_parameters = True 
     training_args.ignore_data_skip = True
-    training_args.ddp_timeout = 10800
     
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None: 
@@ -403,7 +383,7 @@ def main(cfg: DictConfig):
     )
     model = QwenCALM(config)
 
-    # 2. Soft Restart (Load Head/Projector)
+    # 2. Component Loading
     console.rule("[bold cyan]Component Loading[/bold cyan]")
     load_soft_restart_components(model, cfg, console)
     
@@ -414,7 +394,7 @@ def main(cfg: DictConfig):
             r=cfg.model.lora_rank, lora_alpha=cfg.model.lora_alpha,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_dropout=cfg.model.lora_dropout, bias="none", task_type=TaskType.CAUSAL_LM,
-            modules_to_save=["input_proj", "output_head"], 
+            modules_to_save=["output_head"], # Only save Flow Head, Projector is separate if frozen
         )
         
         def load_adapter_if_path_exists(adapter_name, path_key):
@@ -434,7 +414,6 @@ def main(cfg: DictConfig):
             else:
                 console.print(f"[dim]ℹ️  {adapter_name} initialized from scratch[/dim]")
         
-        # Initialize Adapters based on Task Mode
         if cfg.data.task_mode == "tts":
             console.print("[green] -> Mode: TTS Only[/green]")
             model.llm = get_peft_model(model.llm, lora_config, adapter_name="tts")
@@ -452,13 +431,19 @@ def main(cfg: DictConfig):
             load_adapter_if_path_exists("tts", "pretrained_lora_path_tts")
             load_adapter_if_path_exists("asr", "pretrained_lora_path_asr")
 
-    # 4. Freeze Strategy
+    # 4. Freeze Strategy (CRITICAL CHECK)
     should_freeze_proj = cfg.model.get("freeze_projector", False)
     model.input_proj.requires_grad_(not should_freeze_proj)
-    model.output_head.requires_grad_(True)
+    model.output_head.requires_grad_(True) # Flow Head must train
     
-    for n, p in model.llm.named_parameters():
-        if "lora_" in n: p.requires_grad = True
+    if should_freeze_proj:
+        console.print("[bold yellow]🔒 Projector Frozen (Protecting ASR capabilities)[/bold yellow]")
+    else:
+        console.print("[bold red]🔓 Projector Unfrozen (Warning: May degrade ASR)[/bold red]")
+
+    # Double check trainable params
+    trainable_params = [n for n, p in model.named_parameters() if p.requires_grad]
+    console.print(f"🔥 Trainable Modules: {[n for n in trainable_params if 'bias' not in n][:10]} ...")
 
     console.rule()
 

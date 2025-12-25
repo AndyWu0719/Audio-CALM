@@ -27,7 +27,7 @@ model:
   lora_dropout: 0.05
   merge_lora: False       # Set True only for inference or export
   
-  freeze_projector: False
+  freeze_projector: True
   
   # Latent Settings
   use_precomputed_latents: True
@@ -83,7 +83,7 @@ data:
 # -------------------------------------------------------------------
 training:
   output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow"
-  run_name: "flow-moa-tts-4-dim64-1e-4-2048-4"
+  run_name: "flow-moa-tts-4-dim64-1e-4-2048-4-new"
   
   # Checkpointing (Fresh start for MoA)
   resume_from_checkpoint: null 
@@ -135,11 +135,11 @@ training:
 # EVALUATION CONFIGURATION
 # -------------------------------------------------------------------
 evaluation:
-  task: "tts"
+  task: "asr"
   test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl"
   
   # Inference Checkpoint
-  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4/checkpoint-8316"
+  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-6594"
   output_dir: "${hydra:runtime.cwd}/outputs/eval_results_moa"
   
   # Generation Parameters
