@@ -6,8 +6,8 @@ export TOKENIZERS_PARALLELISM=false
 
 export PYTORCH_ENABLE_SDPA_FLASH_ATTENTION=1
 
-export WANDB_PROJECT="Audio-CALM-VAE" 
-export WANDB_NAME="flow-moa-tts-4-dim64-1e-4-2048-4-new" 
+export WANDB_PROJECT="Audio-CALM-MoA" 
+export WANDB_NAME="tts-4-dim64-1e-4-2048-6" 
 MASTER_PORT=29505
 
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \

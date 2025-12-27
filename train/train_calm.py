@@ -1,7 +1,7 @@
 """
 Flow-based Audio-CALM Training Script.
 Optimized for Speed, DDP Stability, and Mixture of Adapters (MoA).
-VERSION: FINAL_AUDITED
+VERSION: FINAL_STABLE (Includes SOA training & Explicit Saving)
 """
 
 import os
@@ -47,11 +47,12 @@ def _get_rank_safe() -> int:
     except: return 0
 
 # ---------------------------------------------------------------------
-# Dataset Definition (Unchanged & Verified Correct)
+# Dataset Definition
 # ---------------------------------------------------------------------
 class CalmDataset(Dataset):
     def __init__(self, latent_dir, subsets, tokenizer, max_text_len=512, 
-                 max_audio_len=1024, use_latents=False, task_mode="mix", task_prob_tts=0.5):
+                 max_audio_len=1024, use_latents=False, task_mode="mix", task_prob_tts=0.5, 
+                 max_samples=None):
         self.tokenizer = tokenizer
         self.max_text_len = max_text_len
         self.max_audio_len = max_audio_len
@@ -101,6 +102,12 @@ class CalmDataset(Dataset):
             console.log(f"[bold green]Matched Pairs: {len(self.data)}[/bold green]")
             if len(self.data) == 0:
                 console.log(f"[bold red]❌ CRITICAL: No data found in {latent_dir}.[/bold red]")
+        
+        if max_samples is not None and max_samples > 0:
+            if len(self.data) > max_samples:
+                self.data = self.data[:max_samples]
+                if _get_rank_safe() == 0:
+                    console.log(f"[yellow]⚠️ Subsampled dataset to {len(self.data)} items.[/yellow]")
 
     def __len__(self): return len(self.data)
 
@@ -121,8 +128,10 @@ class CalmDataset(Dataset):
             
             if audio.shape[0] > self.max_audio_len:
                 if mode == "asr": 
-                    return {"input_ids": [0], "_valid": False}
+                    # ASR: Usually keep full audio or truncate end
+                    return {"input_ids": [0], "_valid": False} # Simple skip for now
                 else:
+                    # TTS: Random crop is acceptable
                     start = random.randint(0, audio.shape[0] - self.max_audio_len)
                     audio = audio[start : start + self.max_audio_len]
 
@@ -161,7 +170,7 @@ class CalmDataset(Dataset):
             return {"input_ids": [0], "_valid": False}
 
 # ---------------------------------------------------------------------
-# Data Collator (Unchanged)
+# Data Collator
 # ---------------------------------------------------------------------
 @dataclass
 class CalmCollator:
@@ -176,13 +185,14 @@ class CalmCollator:
             if T > 20:
                 mask_len = random.randint(5, 10) 
                 t0 = random.randint(0, T - mask_len)
-                audio_feat[:, t0 : t0 + mask_len].fill_(0.0)
+                min_val = audio_feat.min() # 通常约为 -11.5
+                audio_feat[:, t0 : t0 + mask_len].fill_(min_val)
         return audio_feat
 
     def __call__(self, features):
         valid = [f for f in features if f.get("_valid", False)]
         if not valid:
-            # Return dummy batch to avoid crash
+            # Fallback for empty batch
             return {
                 "text_input_ids": torch.tensor([[self.pad_token_id]], dtype=torch.long),
                 "attention_mask": torch.tensor([[0]], dtype=torch.long),
@@ -206,8 +216,16 @@ class CalmCollator:
                 batch_first=True, 
                 padding_value=self.pad_token_id
             ),
-            "labels": torch.nn.utils.rnn.pad_sequence([f["labels"] for f in valid], batch_first=True, padding_value=-100),
-            "audio_features": torch.nn.utils.rnn.pad_sequence(proc_audio, batch_first=True, padding_value=self.audio_pad_val).transpose(1, 2),
+            "labels": torch.nn.utils.rnn.pad_sequence(
+                [f["labels"] for f in valid], 
+                batch_first=True, 
+                padding_value=-100
+            ),
+            "audio_features": torch.nn.utils.rnn.pad_sequence(
+                proc_audio, 
+                batch_first=True, 
+                padding_value=self.audio_pad_val
+            ).transpose(1, 2),
             "audio_lens": torch.tensor([f.shape[0] for f in proc_audio], dtype=torch.long),
             "task_modes": [f["task_mode"] for f in valid]
         }
@@ -216,7 +234,7 @@ class CalmCollator:
         return batch
 
 # ---------------------------------------------------------------------
-# Trainer & Optimization
+# Trainer (Modified for Saving)
 # ---------------------------------------------------------------------
 class CalmTrainer(Trainer):
     def __init__(self, *args, **kwargs):
@@ -229,7 +247,8 @@ class CalmTrainer(Trainer):
             no_decay_parameters = []
             projector_parameters = []
             
-            head_keywords = ["input_proj", "output_head"]
+            # [FIX] Added "soa_embed" to head_keywords
+            head_keywords = ["input_proj", "output_head", "soa_embed"]
             
             model_to_opt = self.model_wrapped if hasattr(self, "model_wrapped") else self.model
             if hasattr(model_to_opt, "module"): model_to_opt = model_to_opt.module
@@ -258,10 +277,10 @@ class CalmTrainer(Trainer):
         return self.optimizer
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # Handle Peft Adapter Switching
         peft_model = model.module.llm if hasattr(model, "module") else model.llm
-        raw_model = model.module if hasattr(model, "module") else model
-
         task_modes = inputs.get("task_modes", ["tts"])
+        # Majority vote for batch adapter
         target_adapter = "tts" if task_modes.count("tts") >= task_modes.count("asr") else "asr"
         
         if hasattr(peft_model, "set_adapter") and target_adapter in peft_model.peft_config:
@@ -270,16 +289,16 @@ class CalmTrainer(Trainer):
         outputs = model(**inputs)
         loss = outputs["loss"]
 
-        # [CRITICAL DDP FIX] Ghost Gradients for Unused Parameters
-        # When training only TTS, ASR head params (and vice versa) are unused.
-        # DDP will hang if we don't calculate a dummy loss on them.
+        # DDP Dummy Loss for unused parameters
         if self.model.training:
+            raw_model = model.module if hasattr(model, "module") else model
             dummy_loss = 0.0
             for name, param in raw_model.named_parameters():
                 if param.requires_grad and param.grad is None:
                     dummy_loss += param.sum() * 0.0
             loss += dummy_loss
 
+        # Logging
         if self.model.training:
              l_tts = outputs.get("loss_tts", torch.tensor(0., device=loss.device)).detach()
              l_asr = outputs.get("loss_asr", torch.tensor(0., device=loss.device)).detach()
@@ -298,6 +317,33 @@ class CalmTrainer(Trainer):
         self.loss_meters = {"tts": 0.0, "asr": 0.0, "tts_cnt": 0, "asr_cnt": 0}
         super().log(logs, *args, **kwargs)
         
+    # [FIX] Custom Save Model (Fixed Argument Signature & DDP Safety)
+    def save_model(self, output_dir=None, _internal_call=False, **kwargs):
+        if output_dir is None:
+            output_dir = self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        super().save_model(output_dir, _internal_call=_internal_call, **kwargs)
+        if _get_rank_safe() == 0:
+            model = self.model
+            if hasattr(model, "module"): 
+                model = model.module 
+            
+            console.print(f"[magenta]💾 Saving Projectors & SOA to {output_dir}...[/magenta]")
+            
+            try:
+                # Save Input Projector
+                torch.save(model.input_proj.state_dict(), os.path.join(output_dir, "input_proj.bin"))
+                
+                # Save Output Head
+                torch.save(model.output_head.state_dict(), os.path.join(output_dir, "output_head.bin"))
+                
+                # Save SOA Embed
+                if hasattr(model, "soa_embed"):
+                    data_to_save = model.soa_embed.data if isinstance(model.soa_embed, torch.nn.Parameter) else model.soa_embed
+                    torch.save({"weight": data_to_save}, os.path.join(output_dir, "soa_embed.bin"))
+            except Exception as e:
+                console.print(f"[bold red]❌ Error saving custom components: {e}[/bold red]")
+            
     def get_eval_dataloader(self, eval_dataset=None):
         if eval_dataset is None:
             eval_dataset = self.eval_dataset
@@ -360,8 +406,6 @@ def main(cfg: DictConfig):
     
     set_seed(cfg.training.seed)
     
-    # [FIX] Force find_unused_parameters=True for MoA stability
-    # Because ASR batch won't use Flow Head, and TTS batch won't use CTC Head
     training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
     training_args.ddp_find_unused_parameters = True 
     training_args.ignore_data_skip = True
@@ -369,7 +413,8 @@ def main(cfg: DictConfig):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.qwen_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None: 
         tokenizer.pad_token_id = tokenizer.eod_id if hasattr(tokenizer, 'eod_id') else tokenizer.eos_token_id
-    tokenizer.padding_side = "right"
+    
+    tokenizer.padding_side = "right" 
 
     # 1. Model Initialization
     config = QwenCALMConfig(
@@ -394,7 +439,7 @@ def main(cfg: DictConfig):
             r=cfg.model.lora_rank, lora_alpha=cfg.model.lora_alpha,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_dropout=cfg.model.lora_dropout, bias="none", task_type=TaskType.CAUSAL_LM,
-            modules_to_save=["output_head"], # Only save Flow Head, Projector is separate if frozen
+            modules_to_save=[], # [FIX] We handle saving manually in Trainer
         )
         
         def load_adapter_if_path_exists(adapter_name, path_key):
@@ -431,17 +476,23 @@ def main(cfg: DictConfig):
             load_adapter_if_path_exists("tts", "pretrained_lora_path_tts")
             load_adapter_if_path_exists("asr", "pretrained_lora_path_asr")
 
-    # 4. Freeze Strategy (CRITICAL CHECK)
+    # 4. Freeze Strategy (Modified for Safety)
     should_freeze_proj = cfg.model.get("freeze_projector", False)
-    model.input_proj.requires_grad_(not should_freeze_proj)
-    model.output_head.requires_grad_(True) # Flow Head must train
     
+    # Input Projector (ASR Part)
+    model.input_proj.requires_grad_(not should_freeze_proj)
     if should_freeze_proj:
-        console.print("[bold yellow]🔒 Projector Frozen (Protecting ASR capabilities)[/bold yellow]")
-    else:
-        console.print("[bold red]🔓 Projector Unfrozen (Warning: May degrade ASR)[/bold red]")
+        model.input_proj.eval()
+        console.print("[bold yellow]🔒 Input Projector Frozen (Protecting ASR capabilities)[/bold yellow]")
+    
+    # Output Head (TTS Part) - Always Train
+    model.output_head.requires_grad_(True)
+    
+    # [FIX] Explicitly unfreeze SOA Embed (Critical for TTS)
+    if hasattr(model, "soa_embed"):
+        model.soa_embed.requires_grad_(True)
+        console.print("[bold green]🔓 SOA Embed Unfrozen (Ready for TTS training)[/bold green]")
 
-    # Double check trainable params
     trainable_params = [n for n, p in model.named_parameters() if p.requires_grad]
     console.print(f"🔥 Trainable Modules: {[n for n in trainable_params if 'bias' not in n][:10]} ...")
 
@@ -456,8 +507,11 @@ def main(cfg: DictConfig):
         max_audio_len=cfg.data.max_audio_len, 
         use_latents=cfg.model.use_precomputed_latents, 
         task_mode=cfg.data.task_mode, 
-        task_prob_tts=cfg.data.task_prob_tts
+        task_prob_tts=cfg.data.task_prob_tts,
+        max_samples=None 
     )
+    
+    eval_max_samples = cfg.training.get("eval_max_samples", 200)
     eval_ds = CalmDataset(
         latent_dir=cfg.data.eval_latent_dir or cfg.data.latent_dir, 
         subsets=cfg.data.eval_subsets, 
@@ -466,7 +520,8 @@ def main(cfg: DictConfig):
         max_audio_len=cfg.data.max_audio_len, 
         use_latents=cfg.model.use_precomputed_latents, 
         task_mode=cfg.data.task_mode, 
-        task_prob_tts=cfg.data.task_prob_tts
+        task_prob_tts=cfg.data.task_prob_tts,
+        max_samples=eval_max_samples
     )
     
     train_collator = CalmCollator(tokenizer.pad_token_id, training=True)
@@ -486,6 +541,7 @@ def main(cfg: DictConfig):
     else:
         trainer.train()
     
+    # Final Save
     trainer.save_model(training_args.output_dir)
 
 if __name__ == "__main__":

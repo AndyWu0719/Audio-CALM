@@ -35,7 +35,7 @@ model:
 
   # Flow Matching Hyperparameters
   flow_hidden_dim: 2048   # Increased for better capacity (from 1024)
-  flow_num_layers: 4      # Increased depth (from 3)
+  flow_num_layers: 6      # Increased depth (from 3)
 
   # === Soft Restart & Component Loading ===
   # 1. Non-LoRA Components (Inherit alignment from Phase 1)
@@ -83,7 +83,7 @@ data:
 # -------------------------------------------------------------------
 training:
   output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow"
-  run_name: "flow-moa-tts-4-dim64-1e-4-2048-4-new"
+  run_name: "flow-moa-tts-4-dim64-1e-4-2048-4"
   
   # Checkpointing (Fresh start for MoA)
   resume_from_checkpoint: null 
@@ -135,11 +135,11 @@ training:
 # EVALUATION CONFIGURATION
 # -------------------------------------------------------------------
 evaluation:
-  task: "asr"
+  task: "tts"
   test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl"
   
   # Inference Checkpoint
-  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/checkpoint-6594"
+  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/flow-moa-tts-4-dim64-1e-4-2048-4-new/checkpoint-8316"
   output_dir: "${hydra:runtime.cwd}/outputs/eval_results_moa"
   
   # Generation Parameters

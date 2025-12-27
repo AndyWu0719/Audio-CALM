@@ -1,7 +1,7 @@
 """
 Flow-based Audio-CALM: Qwen-based Multimodal Model.
-Features: PyTorch SDPA/FlashAttn2, Flow Matching Head, ASR-Optimized Linear Projector.
-FIXED: Native support for inference offset (No Monkey Patch needed).
+Features: PyTorch SDPA, Flow Matching Head, ASR-Optimized Linear Projector.
+FIXED: Right Padding Logic, SOA Token, and Correct Slicing.
 """
 
 import os
@@ -13,17 +13,20 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PretrainedConfig
 from models.modeling_vae import AcousticVAE
 
 # ---------------------------------------------------------------------
-# Audio Input Projector (ASR Optimized + Inference Fix)
+# Constants
+# ---------------------------------------------------------------------
+EPS = 1e-8
+
+# ---------------------------------------------------------------------
+# Audio Input Projector (Fixed with Offset Support)
 # ---------------------------------------------------------------------
 class AudioInputProjector(nn.Module):
-    """
-    Projector combining Conv1d (local context), Positional Embeddings (alignment),
-    and Deep MLP (feature mixing).
-    """
     def __init__(self, latent_dim, llm_dim, max_audio_len=1024):
         super().__init__()
         
         # 1. Local Feature Extraction
+        # 注意：在自回归推理时，Conv1d 如果 kernel>1 会因为缺乏上下文而和训练时不一致
+        # 但为了保持架构简单，这里暂不引入复杂的 Cache 机制，仅修复位置编码问题
         self.conv_block = nn.Sequential(
             nn.Conv1d(latent_dim, llm_dim, kernel_size=3, padding=1),
             nn.GELU(),
@@ -45,36 +48,40 @@ class AudioInputProjector(nn.Module):
         ])
         self.post_norm = nn.LayerNorm(llm_dim, eps=1e-6)
         
-        # Init weights slightly better
+        # Better init
         nn.init.normal_(self.pos_emb.weight, mean=0.0, std=0.02)
 
     def forward(self, x, offset=0):
-        """
-        Args:
-            x: [Batch, Time, Dim]
-            offset: (int) Starting position index. Crucial for auto-regressive inference.
-        """
         # x: [Batch, Time, Dim]
         B, T, _ = x.shape
         device = x.device
         
-        # Step A: Conv1d Feature Extraction
+        # Step A: Conv1d
         x = x.transpose(1, 2)
         x = self.conv_block(x)
         x = x.transpose(1, 2)
         
-        # Step B: Inject Positional Embeddings (FIXED for Inference)
-        # Calculate start and end based on offset
-        start = offset
-        end = offset + T
+        # Step B: Positional Embeddings (FIXED)
+        # 核心修复：从 offset 开始生成 position_ids
         
-        # Clamp to avoid index out of bounds during extremely long generation
-        pos_ids = torch.arange(start, end, device=device).clamp(max=self.max_audio_len - 1).unsqueeze(0).expand(B, -1)
+        # 1. 计算当前的绝对位置范围
+        start_pos = offset
+        end_pos = offset + T
         
-        pos_emb_val = self.pos_emb(pos_ids)
+        # 2. 生成原始 ID: [offset, offset+1, ..., offset+T-1]
+        pos_ids = torch.arange(start_pos, end_pos, device=device).unsqueeze(0).expand(B, -1)
+        
+        # 3. 越界处理 (Clamping)
+        # 如果超出 max_len，全部 clamp 到最后一个位置 (或截断，视策略而定，这里选择 clamp 防止 crash)
+        pos_ids_clamped = pos_ids.clamp(max=self.max_audio_len - 1)
+        
+        # 4. 查表
+        pos_emb_val = self.pos_emb(pos_ids_clamped)
+
+        # 5. 叠加
         x = x + pos_emb_val
             
-        # Step C: Deep Mixing
+        # Step C: Mixing
         for block in self.blocks:
             x = x + block(x)
         
@@ -115,7 +122,7 @@ class FlowMatchingHead(nn.Module):
         ])
         self.out_proj = nn.Linear(hidden_dim, output_dim)
         
-        # Zero initialization for stability (Crucial for Flow Matching)
+        # [IMPORTANT] Zero init for flow matching stability
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
@@ -157,8 +164,6 @@ def compute_flow_loss(model_head, condition, target_latent, mask, cfg_dropout_pr
     t = torch.rand(B, device=device, dtype=dtype).unsqueeze(1).expand(-1, T)
     x0 = torch.randn_like(target_latent)
     x1 = target_latent
-    
-    # Linear Interpolation (Optimal Transport Path)
     xt = (1 - t.unsqueeze(-1)) * x0 + t.unsqueeze(-1) * x1
     target_v = x1 - x0
     
@@ -201,19 +206,10 @@ class QwenCALM(PreTrainedModel):
         
         # 1. Load LLM Backbone
         print(f"Loading Qwen from {config.qwen_path}...")
-        try:
-            # Try efficient attention first
-            import flash_attn
-            attn_impl = "flash_attention_2"
-            print(f"✅ Flash Attention 2 found.")
-        except ImportError:
-            print("⚠️ Flash Attention 2 not found, falling back to SDPA.")
-            attn_impl = "sdpa"
-            
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.qwen_path, trust_remote_code=True, 
             torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, 
-            attn_implementation=attn_impl
+            attn_implementation="sdpa"
         )
 
         # 2. VAE Setup
@@ -230,25 +226,28 @@ class QwenCALM(PreTrainedModel):
         qwen_dim = self.llm.config.hidden_size
         self.input_proj = AudioInputProjector(vae_latent_dim, qwen_dim, max_audio_len=config.max_audio_len)
         
-        # 4. CTC Head (for ASR)
+        # 4. [NEW] Start of Audio (SOA) Token
+        # 这是一个可学习的向量，用于分隔文本和音频，并作为音频生成的起始信号
+        self.soa_embed = nn.Parameter(torch.randn(1, 1, qwen_dim) * 0.02)
+        
+        # 5. Flow Head (for TTS)
+        print(f"[QwenCALM] Flow Head (dim={config.flow_hidden_dim}, L={config.flow_num_layers})")
+        self.output_head = FlowMatchingHead(
+            qwen_dim, vae_latent_dim, config.flow_hidden_dim, config.flow_num_layers
+        )
+        
+        # CTC (Optional)
         if config.ctc_loss_weight > 0:
             vocab_size = self.llm.config.vocab_size
             print(f"[QwenCALM] Initializing CTC Head (Vocab={vocab_size})...")
             self.ctc_head = self.llm.lm_head 
             self.ctc_loss_fct = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
-        # 5. Flow Head (for TTS)
-        print(f"[QwenCALM] Flow Head (dim={config.flow_hidden_dim}, L={config.flow_num_layers})")
-        self.output_head = FlowMatchingHead(
-            qwen_dim, vae_latent_dim, config.flow_hidden_dim, config.flow_num_layers
-        )
-
     def get_input_embeddings(self): 
         return self.llm.get_input_embeddings()
     
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        if gradient_checkpointing_kwargs is None: 
-            gradient_checkpointing_kwargs = {}
+        if gradient_checkpointing_kwargs is None: gradient_checkpointing_kwargs = {}
         gradient_checkpointing_kwargs["use_reentrant"] = False 
         self.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
         self.input_proj.requires_grad_(True)
@@ -259,8 +258,7 @@ class QwenCALM(PreTrainedModel):
     def forward(self, text_input_ids, audio_features, attention_mask=None, labels=None, task_modes=None, audio_lens=None):
         batch_size = text_input_ids.shape[0]
         device = text_input_ids.device
-        if task_modes is None: 
-            task_modes = ["tts"] * batch_size
+        if task_modes is None: task_modes = ["tts"] * batch_size
 
         # --- 1. Latent Extraction ---
         with torch.no_grad():
@@ -270,7 +268,19 @@ class QwenCALM(PreTrainedModel):
                 mu, _ = self.vae.encode(audio_features)
                 gt_latents = mu.transpose(1, 2)
         
-        # --- 2. Embedding & Mask Preparation ---
+        gt_latents = gt_latents.to(dtype=self.llm.dtype)
+        
+        # --- 2. Embedding ---
+        audio_embeds = self.input_proj(gt_latents) 
+        if self.training and self.llm.is_gradient_checkpointing:
+            audio_embeds.requires_grad_(True)
+            
+        text_embeds = self.get_input_embeddings()(text_input_ids)
+        if attention_mask is None:
+            # 简单处理：全1 Mask
+            attention_mask = torch.ones((batch_size, text_input_ids.shape[1]), device=device, dtype=torch.long)
+
+        # Audio Mask Preparation
         B_aud, T_aud, _ = gt_latents.shape
         if audio_lens is not None:
             if self.use_precomputed_latents:
@@ -283,18 +293,9 @@ class QwenCALM(PreTrainedModel):
         else:
             audio_mask = torch.ones((B_aud, T_aud), device=device, dtype=torch.long)
 
-        gt_latents = gt_latents.to(dtype=self.llm.dtype)
-        
-        # Audio Embedding
-        # Note: input_proj now supports offset, but for training we pass full sequence, so default offset=0 is correct
-        audio_embeds = self.input_proj(gt_latents) 
-        
-        if self.training and self.llm.is_gradient_checkpointing:
-            audio_embeds.requires_grad_(True)
-            
-        text_embeds = self.get_input_embeddings()(text_input_ids)
-        if attention_mask is None:
-            attention_mask = torch.ones((batch_size, text_input_ids.shape[1]), device=device, dtype=torch.long)
+        # SOA Embedding
+        soa_tokens = self.soa_embed.expand(batch_size, -1, -1)
+        soa_mask = torch.ones((batch_size, 1), device=device, dtype=torch.long)
 
         # Loss Accumulators
         total_loss = torch.tensor(0.0, device=device)
@@ -304,33 +305,54 @@ class QwenCALM(PreTrainedModel):
         tts_count = 0
         asr_count = 0
 
-        # --- 3. TTS Branch (Flow Matching) ---
+        # --- 3. TTS Branch (Corrected Logic) ---
         tts_indices = [i for i, m in enumerate(task_modes) if m == "tts"]
         if len(tts_indices) > 0:
-            if hasattr(self.llm, "set_adapter"): 
-                self.llm.set_adapter("tts")
+            if hasattr(self.llm, "set_adapter"): self.llm.set_adapter("tts")
             
             idx = torch.tensor(tts_indices, device=device)
-            # Concatenate Text + Audio (Latent Conditioning)
-            # Input: [Text, Audio[:-1]] -> Predicts Audio[1:] (and Audio[0] from Text)
-            inp = torch.cat([text_embeds[idx], audio_embeds[idx][:, :-1, :]], dim=1)
-            full_mask = torch.cat([attention_mask[idx], audio_mask[idx][:, :-1]], dim=1)
             
-            # Position IDs logic handles the concatenation timeline
+            # Input Construction: [Text (with Pads), SOA, Audio (shifted)]
+            inp = torch.cat([
+                text_embeds[idx], 
+                soa_tokens[idx], 
+                audio_embeds[idx][:, :-1, :]
+            ], dim=1)
+            
+            full_mask = torch.cat([
+                attention_mask[idx], 
+                soa_mask[idx], 
+                audio_mask[idx][:, :-1]
+            ], dim=1)
+            
+            # [CRITICAL FIX] Position IDs
+            # 使用 cumsum 忽略 Text 部分的 Padding，使 SOA 逻辑上紧挨着 Text 最后一个有效 Token
             pos_ids = full_mask.long().cumsum(-1) - 1
             pos_ids.masked_fill_(full_mask == 0, 1)
 
             out = self.llm(inputs_embeds=inp, attention_mask=full_mask, position_ids=pos_ids, output_hidden_states=True)
             
-            # Extract Audio Output
-            # We want the outputs corresponding to the text (predicting first audio frame) 
-            # and the audio frames (predicting next audio frames).
-            # The slicing starts from the last text token.
-            audio_hidden = out.hidden_states[-1][:, text_embeds[idx].shape[1]-1 :, :]
-            tts_mask = audio_mask[idx][:, : gt_latents.size(1)].bool()
+            # [CRITICAL FIX] Slicing Logic
+            # 从 SOA 开始切片。SOA 的物理位置是 text_embeds.shape[1]
+            slice_start_idx = text_embeds[idx].shape[1]
             
-            # Compute Flow Loss
-            tts_loss = compute_flow_loss(self.output_head, audio_hidden, gt_latents[idx], tts_mask, cfg_dropout_prob=0.1)
+            # 提取 Hidden States: [SOA_out, Audio_0_out, ...]
+            # 这些分别预测: [Audio_0, Audio_1, ...]
+            audio_hidden = out.hidden_states[-1][:, slice_start_idx:, :]
+            
+            # 确保长度对齐 (处理 Audio shift 后的边界)
+            target_len = gt_latents.size(1)
+            if audio_hidden.shape[1] > target_len:
+                audio_hidden = audio_hidden[:, :target_len, :]
+            elif audio_hidden.shape[1] < target_len:
+                pad_len = target_len - audio_hidden.shape[1]
+                audio_hidden = F.pad(audio_hidden, (0, 0, 0, pad_len))
+
+            # Compute Loss
+            cur_target = gt_latents[idx]
+            cur_target_mask = audio_mask[idx][:, :cur_target.size(1)].bool()
+            
+            tts_loss = compute_flow_loss(self.output_head, audio_hidden, cur_target, cur_target_mask, cfg_dropout_prob=0.1)
 
             total_loss += tts_loss * self.config.audio_loss_weight
             accum_tts_loss += tts_loss
@@ -340,18 +362,16 @@ class QwenCALM(PreTrainedModel):
         # --- 4. ASR Branch (LLM + CTC) ---
         asr_indices = [i for i, m in enumerate(task_modes) if m == "asr"]
         if len(asr_indices) > 0:
-            if hasattr(self.llm, "set_adapter"): 
-                self.llm.set_adapter("asr")
+            if hasattr(self.llm, "set_adapter"): self.llm.set_adapter("asr")
 
             idx = torch.tensor(asr_indices, device=device)
             sub_audio = audio_embeds[idx]
             sub_text = text_embeds[idx]
             
-            # Input: Audio -> Text
+            # Input: [Audio, Text] - PosIDs 逻辑对这里也同样适用
             inp = torch.cat([sub_audio, sub_text], dim=1)
             full_mask = torch.cat([audio_mask[idx], attention_mask[idx]], dim=1)
             
-            # Label Construction (Mask Audio Part)
             B_sub = len(asr_indices)
             prefix_labels = torch.full((B_sub, sub_audio.shape[1]), -100, dtype=torch.long, device=device)
             full_labels = torch.cat([prefix_labels, labels[idx]], dim=1)
@@ -359,11 +379,10 @@ class QwenCALM(PreTrainedModel):
             pos_ids = full_mask.long().cumsum(-1) - 1
             pos_ids.masked_fill_(full_mask == 0, 1)
 
-            # Main LLM Loss
             out = self.llm(inputs_embeds=inp, attention_mask=full_mask, position_ids=pos_ids, labels=full_labels, use_cache=False)
             main_loss = out.loss
             
-            # CTC Auxiliary Loss
+            # CTC Logic
             ctc_loss = torch.tensor(0.0, device=device)
             if getattr(self, "ctc_head", None) is not None and self.config.ctc_loss_weight > 0:
                 ctc_input = sub_audio 
@@ -373,7 +392,6 @@ class QwenCALM(PreTrainedModel):
                 target_list = []
                 target_lengths = []
                 raw_labels = labels[idx]
-                
                 for k in range(B_sub):
                     valid_tokens = raw_labels[k][raw_labels[k] != -100]
                     target_list.append(valid_tokens)
@@ -384,14 +402,13 @@ class QwenCALM(PreTrainedModel):
                     target_lengths = torch.tensor(target_lengths, device=device, dtype=torch.long)
                     input_lengths = audio_mask[idx].sum(dim=1)
                     ctc_loss = self.ctc_loss_fct(ctc_log_probs, ctc_targets, input_lengths, target_lengths)
-            
+
             total_asr_loss = main_loss + self.config.ctc_loss_weight * ctc_loss
             total_loss += total_asr_loss
             accum_asr_loss += main_loss
             asr_count += 1
             valid_samples += 1
 
-        # --- 5. Aggregation ---
         if valid_samples > 0: 
             total_loss = total_loss / valid_samples
         
