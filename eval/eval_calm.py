@@ -22,9 +22,10 @@ from peft import PeftModel
 import evaluate
 from rich.logging import RichHandler
 from rich.console import Console
+import matplotlib.pyplot as plt
 
 # --- Environment Patches ---
-# Fix for torchaudio backend issues on some environments
+# 修复部分环境中 torchaudio 后端检测的问题
 if not hasattr(torchaudio, "list_audio_backends"):
     try:
         import torchaudio.backend
@@ -33,7 +34,7 @@ if not hasattr(torchaudio, "list_audio_backends"):
         torchaudio.list_audio_backends = lambda: []
 
 sys.path.append(os.getcwd())
-# Ensure modeling_calm.py is in the models/ folder
+# 【对应关系】：导入 modeling_calm.py 中的模型定义
 from models.modeling_calm import QwenCALM, QwenCALMConfig
 
 logging.basicConfig(level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler(rich_tracebacks=True, show_path=False)])
@@ -50,6 +51,9 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 def load_dataset_jsonl(path: str, max_samples: int = -1) -> List[Dict]:
+    """
+    功能：加载测试集数据 (.jsonl 格式)。
+    """
     if not os.path.exists(path):
         logger.error(f"Dataset not found: {path}")
         return []
@@ -67,6 +71,13 @@ def load_dataset_jsonl(path: str, max_samples: int = -1) -> List[Dict]:
 # 1. Vocoder (With Interpolation for TTS)
 # ==============================================================================
 class Vocoder:
+    """
+    功能：声码器，负责将 Mel 频谱转换为波形。
+    
+    【对应关系】：
+    - 输入：来自 QwenCALM.vae.decode() 输出的 Mel 频谱。
+    - 关键逻辑：处理 Log-Mel (VAE输出) 到 Log10-Mel (HiFi-GAN输入) 的转换。
+    """
     def __init__(self, device="cuda"):
         self.device = device
         logger.info("🔧 Initializing Vocoder...")
@@ -82,6 +93,7 @@ class Vocoder:
         except Exception as e:
             logger.warning(f"⚠️ HiFi-GAN not found ({e}). Will use Griffin-Lim.")
 
+        # Griffin-Lim 作为备选方案
         self.n_fft = 1024
         self.n_mels = 80
         self.sample_rate = 16000
@@ -100,23 +112,29 @@ class Vocoder:
         ).to(device)
 
     def decode(self, mel):
+        """
+        功能：执行解码。
+        """
         mel = mel.to(self.device).to(torch.float32)
+        
+        # 1. 维度统一: [B, 80, T]
         if mel.dim() == 2: mel = mel.unsqueeze(0)
         if mel.shape[-1] == 80: mel = mel.transpose(1, 2)
 
-        # Interpolate to fix potential temporal resolution mismatch (Chipmunk effect)
-        mel = torch.nn.functional.interpolate(
-            mel, scale_factor=2.0, mode='linear', align_corners=False
-        )
-
+        # 2. HiFi-GAN 解码
         if self.hifi is not None:
+            # [CRITICAL FIX] 恢复缩放逻辑
+            # VAE 输出是 Log (ln) Mel，HiFiGAN 需要 Log10 Mel
+            # 关系: ln(x) = ln(10) * log10(x) => log10(x) ≈ ln(x) * 0.43429
+            # 如果不缩放，能量会过大导致破音
             mel_log10 = mel * 0.43429
+            
             try: return self.hifi.decode_batch(mel_log10.transpose(1, 2)).squeeze(1)
             except: 
                 try: return self.hifi.decode_batch(mel_log10).squeeze(1)
                 except: pass
 
-        # Fallback to Griffin-Lim
+        # 3. Fallback: Griffin-Lim (需要 Linear Mel)
         energy_mel = torch.exp(mel) 
         linear_energy = torch.matmul(energy_mel.transpose(1, 2), self.inverse_mel_basis).transpose(1, 2)
         linear_mag = torch.sqrt(torch.clamp(linear_energy, min=1e-8))
@@ -131,6 +149,15 @@ class Vocoder:
 # 2. Model Loading (Fixed for Native SOA Support)
 # ==============================================================================
 def load_model(cfg, device):
+    """
+    功能：加载完整的 QwenCALM 模型用于推理。
+    
+    【对应关系】：
+    - 加载 Config: 对应 config/calm_config.yaml
+    - 加载 Base Model: Qwen2
+    - 加载 Adapter: 对应 train_calm.py 保存的 LoRA
+    - 加载 Projector/Head/SOA: 对应 train_calm.py 手动保存的 .bin 文件
+    """
     logger.info(f"🤖 Loading Model Base: {cfg.model.qwen_path}")
     
     config = QwenCALMConfig(
@@ -142,13 +169,14 @@ def load_model(cfg, device):
         use_precomputed_latents=False 
     )
     
-    # Initialize model structure
+    # 1. 初始化模型结构
     model = QwenCALM(config)
     
     ckpt_dir = cfg.evaluation.checkpoint_path
     logger.info(f"📂 Loading Checkpoints from: {ckpt_dir}")
 
-    # 1. Load LLM Adapters (LoRA)
+    # 2. 加载 LLM Adapters (LoRA)
+    # 尝试加载 ASR 或 TTS Adapter
     if os.path.exists(os.path.join(ckpt_dir, "asr")) or os.path.exists(os.path.join(ckpt_dir, "tts")):
         if os.path.exists(os.path.join(ckpt_dir, "asr")):
             logger.info("  - Loading ASR LoRA...")
@@ -161,54 +189,53 @@ def load_model(cfg, device):
             else:
                 model.llm = PeftModel.from_pretrained(model.llm, os.path.join(ckpt_dir, "tts"), adapter_name="tts")
     else:
-        # Fallback: single adapter at root
+        # Fallback: 根目录下单个 Adapter
         if os.path.exists(os.path.join(ckpt_dir, "adapter_config.json")):
             logger.info("  - Loading Single LoRA...")
             model.llm = PeftModel.from_pretrained(model.llm, ckpt_dir)
 
-    # 2. Load Projectors (Input/Output/SOA)
-    # Load input_proj and output_head
+    # 3. 加载 Projectors (Input/Output)
     for component in ["input_proj", "output_head"]:
         bin_path = os.path.join(ckpt_dir, f"{component}.bin")
         if os.path.exists(bin_path):
             logger.info(f"  - Loading {component}...")
             state_dict = torch.load(bin_path, map_location="cpu")
+            # 修复 DDP 保存时可能带有的 module. 前缀
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
             getattr(model, component).load_state_dict(state_dict)
         else:
             logger.warning(f"  ⚠️  {component}.bin not found! Model may not work.")
 
-    # [FIX] Load soa_embed explicitly
+    # 4. 加载 SOA Embed
     soa_path = os.path.join(ckpt_dir, "soa_embed.bin")
     if os.path.exists(soa_path):
         logger.info(f"  - Loading soa_embed...")
         soa_data = torch.load(soa_path, map_location="cpu")
-        model.soa_embed.data = soa_data # 假设这里加载成功
-    
-        # [建议新增] 确保 dtype 一致
-        if cfg.training.get("bf16", False) and soa_data.dtype != torch.bfloat16:
-             model.soa_embed.data = model.soa_embed.data.to(torch.bfloat16)
-            
-        # Handle different saving formats (dict vs raw tensor)
+        
+        # 兼容处理：支持 dict 或直接 tensor
+        tensor_data = soa_data
         if isinstance(soa_data, dict):
-            # Try common keys or take the first value
             key = next((k for k in ["weight", "soa_embed"] if k in soa_data), None)
             if key:
-                model.soa_embed.data = soa_data[key]
+                tensor_data = soa_data[key]
             else:
-                model.soa_embed.data = list(soa_data.values())[0]
-        else:
-            model.soa_embed.data = soa_data
+                tensor_data = list(soa_data.values())[0]
+        
+        # 精度对齐
+        if cfg.training.get("bf16", False) and tensor_data.dtype != torch.bfloat16:
+             tensor_data = tensor_data.to(torch.bfloat16)
+             
+        model.soa_embed.data = tensor_data
     else:
         logger.warning(f"  ⚠️  soa_embed.bin not found! TTS will produce noise.")
 
     model.to(device).eval()
     
-    # Mixed Precision Setup
+    # 5. 混合精度设置
     if cfg.training.get("bf16", False): 
         logger.info("  - Converting to bfloat16 (VAE remains fp32)")
         model.to(torch.bfloat16)
-        model.vae.to(torch.float32) # VAE usually needs FP32 stability
+        model.vae.to(torch.float32) # VAE 保持 FP32 以保证音质
         
     return model
 
@@ -217,36 +244,40 @@ def load_model(cfg, device):
 # ==============================================================================
 @torch.no_grad()
 def run_asr_inference(model, tokenizer, latent_path, device):
-    # Switch Adapter
+    """
+    功能：ASR 推理。
+    """
+    # 切换 Adapter
     if hasattr(model.llm, "set_adapter") and hasattr(model.llm, "peft_config"):
         if "asr" in model.llm.peft_config:
             model.llm.set_adapter("asr")
 
-    # Load Audio Latent
+    # 1. 加载音频 Latent
     if not os.path.exists(latent_path): return ""
     payload = torch.load(latent_path, map_location="cpu")
     audio = payload.get("latent", payload) if isinstance(payload, dict) else payload
     
-    # Shape check
+    # [T, D] -> [1, T, D]
     if audio.dim() == 2:
-        if audio.shape[0] == 64: audio = audio.transpose(0, 1) # Ensure [T, D]
-        audio = audio.unsqueeze(0) # [1, T, D]
+        if audio.shape[0] == 64: audio = audio.transpose(0, 1) 
+        audio = audio.unsqueeze(0) 
     
     audio = audio.to(device).to(model.llm.dtype)
     
-    # Encode Audio (offset=0 implies start of sequence)
+    # 2. 投影音频特征 (Projector)
+    # 【对应关系】：调用 modeling_calm.py 中 AudioInputProjector
+    # offset=0 表示从头开始编码
     audio_embeds = model.input_proj(audio, offset=0) 
 
-    # Construct Prompt
+    # 3. 构建 Prompt
     prompt = "Transcribe the audio content into text."
     prefix_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     prefix_ids = tokenizer(prefix_text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
     prefix_embeds = model.get_input_embeddings()(prefix_ids)
 
-    # Concat: [Audio] + [Text Prompt]
+    # 4. 拼接并生成
     inputs_embeds = torch.cat([audio_embeds, prefix_embeds], dim=1)
 
-    # Generate
     outputs = model.llm.generate(
         inputs_embeds=inputs_embeds,
         max_new_tokens=256,
@@ -261,6 +292,9 @@ def run_asr_inference(model, tokenizer, latent_path, device):
     return transcription
 
 def eval_task_asr(cfg, model, tokenizer, data):
+    """
+    功能：ASR 任务评估循环，计算 WER。
+    """
     console.print("[bold green]>>> Running ASR Evaluation (Beam=5)[/bold green]")
     
     # Normalizer Setup
@@ -280,7 +314,6 @@ def eval_task_asr(cfg, model, tokenizer, data):
     
     for i, item in enumerate(tqdm(data, desc="ASR Decoding")):
         text_ref = item.get("text", "")
-        # Support various dataset keys
         latent_path = item.get("audio") or item.get("latent_path") or item.get("file_path")
         
         if not latent_path: continue
@@ -315,92 +348,125 @@ def eval_task_asr(cfg, model, tokenizer, data):
 # ==============================================================================
 def generate_one_step_flow(model, condition, steps, cfg_scale, device):
     """
-    Performs Flow Matching ODE integration to generate one frame of latent audio.
+    功能：执行一步流匹配 (Flow Matching) 生成。
+    作用：从高斯噪声出发，根据 condition 预测速度场，通过 Euler 积分推进一步，生成一帧音频 Latent。
+    
+    【对应关系】：
+    - 调用 `model.output_head` (modeling_calm.py)。
     """
-    # Initialize noise
+    # 1. 初始化噪声 x0 ~ N(0, 1)
     noise = torch.randn(1, 1, model.config.latent_dim, device=device, dtype=model.llm.dtype)
     dt = 1.0 / steps
     x = noise
     
+    # 2. ODE 积分循环
     for i in range(steps):
         t = torch.full((1,), i/steps, device=device, dtype=x.dtype)
         
-        # [FIXED HERE] -----------------------------------------
-        # Definition: forward(condition, noisy_x, t)
+        # [FIXED] 调用 Flow Head
+        # v_cond: 有条件生成
         v_cond = model.output_head(condition, x, t)
+        # v_uncond: 无条件生成 (输入全零 Condition)
         v_uncond = model.output_head(torch.zeros_like(condition), x, t)
-        # ------------------------------------------------------
         
+        # 3. CFG (Classifier-Free Guidance) 引导
+        # 公式: v = v_uncond + scale * (v_cond - v_uncond)
         v = v_uncond + cfg_scale * (v_cond - v_uncond)
+        
+        # 4. 更新 x
         x = x + v * dt
         
     return x
 
 @torch.no_grad()
-def run_tts_inference(model, tokenizer, vocoder, text, steps=10, cfg_scale=1.0, device="cuda"):
-    # Switch Adapter
+def run_tts_inference(model, tokenizer, vocoder, text, steps=10, cfg_scale=1.0, device="cuda", save_plot_path=None):
+    """
+    功能：TTS 推理主函数 (自回归生成)。
+    步骤：
+    1. 预填充 (Prefill): 处理 Prompt，获取 SOA Token 的输出作为初始 Condition。
+    2. 自回归循环 (Autoregressive Loop): 逐帧生成音频 Latent。
+    3. 解码 (Decode): Latent -> VAE Decode -> Mel -> Vocoder -> Waveform。
+    """
+    # 切换 Adapter
     if hasattr(model.llm, "set_adapter") and hasattr(model.llm, "peft_config"):
         if "tts" in model.llm.peft_config:
             model.llm.set_adapter("tts")
 
-    # 1. Prepare Text Prompt
+    # 1. 准备 Text Prompt
     prompt = f"Read this text:\n{text}"
     formatted_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     text_ids = tokenizer(formatted_text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
     text_embeds = model.get_input_embeddings()(text_ids)
     
-    # 2. Append SOA Token (Condition for first audio frame)
-    # model.soa_embed is [1, 1, Hidden]
+    # 2. 添加 SOA (Start of Audio) Token
+    # 这是生成的触发器
     soa_token = model.soa_embed.expand(1, -1, -1) 
     inputs_embeds = torch.cat([text_embeds, soa_token], dim=1)
     
-    # 3. Run LLM Prefill
+    # 3. 运行 LLM 预填充
     out = model.llm(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=None, output_hidden_states=True)
     past_kv = out.past_key_values
     
-    # The last hidden state corresponds to the SOA token -> Condition for Audio_0
+    # 获取第一个 Condition (来自 SOA 的输出隐状态)
     condition = out.hidden_states[-1][:, -1:, :] 
     
-    # 4. Generate First Frame (Audio_0) via Flow
+    # 4. 生成第一帧音频 Latent
     curr_latent = generate_one_step_flow(model, condition, steps, cfg_scale, device)
     history_latents = [curr_latent]
 
-    # 5. Autoregressive Loop
-    # Limit max length to avoid infinite generation
+    # 5. 自回归循环
+    # 限制最大长度防止死循环
     max_frames = 500 
     pbar = tqdm(range(max_frames), desc="Gen Audio", leave=False)
     
     for i in pbar:
-        # Input to LLM: Current Audio Latent (projected)
-        # Offset i corresponds to position i in the audio sequence
+        # 输入: 当前生成的 Latent
         input_latent = curr_latent
+        # [Offset] 告诉 Projector 当前是第 i 帧 (i=0 对应 Audio 的第0帧)
+        # 【对应关系】：调用 modeling_calm.py 中 AudioInputProjector.forward(x, offset)
         curr_embeds = model.input_proj(input_latent, offset=i)
         
-        # LLM Step
+        # LLM Step: 预测下一个 Condition
         out = model.llm(inputs_embeds=curr_embeds, use_cache=True, past_key_values=past_kv, output_hidden_states=True)
         past_kv = out.past_key_values
         
-        # Get Condition for Next Frame
+        # 获取 Condition
         condition = out.hidden_states[-1][:, -1:, :]
         
-        # Stop Token Check (Optional: Detect silence or specific latent pattern)
-        # For now, we rely on fixed length or basic checks (not implemented here)
+        # TODO: 可以在这里添加 Stop Token 检测逻辑
         
-        # Generate Next Frame via Flow
+        # Flow 生成下一帧
         curr_latent = generate_one_step_flow(model, condition, steps, cfg_scale, device)
         history_latents.append(curr_latent)
 
-    # 6. Decode Latents to Waveform
-    latents = torch.cat(history_latents, dim=1).transpose(1, 2).to(torch.float32) # [1, Latent, T]
+    # 6. 解码为波形
+    # [1, Latent, T]
+    latents = torch.cat(history_latents, dim=1).transpose(1, 2).to(torch.float32) 
     
-    # VAE Decode
-    mel = model.vae.decode(latents)
+    # VAE Decode -> Mel Spectrogram
+    # 【对应关系】：调用 modeling_vae.py 中的 AcousticVAE.decode
+    mel = model.vae.decode(latents) # [1, 80, T]
     
-    # Vocoder
+    # 调试可视化: 保存 Mel 频谱图
+    if save_plot_path:
+        mel_cpu = mel.squeeze().float().cpu().numpy()
+        plt.figure(figsize=(10, 4))
+        plt.imshow(mel_cpu, aspect='auto', origin='lower', interpolation='none')
+        plt.colorbar()
+        plt.title(f"Generated Mel (Text: {text[:20]}...)")
+        plt.tight_layout()
+        plt.savefig(save_plot_path)
+        plt.close()
+    
+    # Vocoder Decode -> Waveform
     wav = vocoder.decode(mel)
+    
     return wav.cpu()
 
 def eval_task_tts(cfg, model, tokenizer, vocoder, data):
+    """
+    功能：TTS 任务评估循环，生成音频并保存。
+    """
     wav_dir = os.path.join(cfg.evaluation.output_dir, "generated_wavs")
     os.makedirs(wav_dir, exist_ok=True)
     csv_file = open(os.path.join(cfg.evaluation.output_dir, "tts_results.csv"), "w", newline="", encoding="utf-8")
@@ -408,7 +474,9 @@ def eval_task_tts(cfg, model, tokenizer, vocoder, data):
     writer.writerow(["id", "text", "wav_path"])
     
     console.print(f"[bold green]>>> Running TTS Evaluation (Steps={cfg.evaluation.flow_steps})[/bold green]")
-
+    img_dir = os.path.join(cfg.evaluation.output_dir, "mel_plots")
+    os.makedirs(img_dir, exist_ok=True)
+    
     for i, item in enumerate(data):
         text = item.get("text", "")
         if not text: continue
@@ -420,7 +488,8 @@ def eval_task_tts(cfg, model, tokenizer, vocoder, data):
                 model, tokenizer, vocoder, text, 
                 steps=steps, 
                 cfg_scale=scale, 
-                device=cfg.device
+                device=cfg.device,
+                save_plot_path=os.path.join(img_dir, f"mel_{i}.png")
             )
             
             wav_np = wav.squeeze().numpy()
@@ -453,13 +522,13 @@ def main(cfg: DictConfig):
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.qwen_path, trust_remote_code=True)
     
-    # Load Model with Fixed Logic
+    # 1. 加载模型
     model = load_model(cfg, cfg.device)
     
-    # Load Data
+    # 2. 加载数据
     data = load_dataset_jsonl(cfg.evaluation.test_file, cfg.evaluation.max_samples)
     
-    # Dispatch Task
+    # 3. 任务分发
     task = cfg.evaluation.task.lower()
     if task == "tts":
         vocoder = Vocoder(cfg.device)

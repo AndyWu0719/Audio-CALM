@@ -1,3 +1,4 @@
+# train/train_vae.py
 import os
 import sys
 import torch
@@ -8,7 +9,7 @@ from typing import List
 from glob import glob
 import random
 
-# Rich & WandB
+# 引入 Rich 终端美化 和 WandB 日志
 from rich.console import Console
 from rich.traceback import install
 import wandb
@@ -20,14 +21,24 @@ sys.path.append(os.getcwd())
 
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments, set_seed
+# 【对应关系】：导入 VAE 模型定义
 from models.modeling_vae import AcousticVAE, AudioVAEConfig
 
-# --- 原有的 MelDataset 和 data_collator 保持不变 ---
 class MelDataset(Dataset):
+    """
+    功能：加载 Mel 频谱数据集。
+    注意：这里加载的是预处理好的 .pt 文件。
+    
+    【文件间关系】：
+    - 读取的数据：假设是 `process_dataset.py` 生成的 .pt 文件。
+    - 注意点：如果 .pt 存的是字典 {'latent':..., 'mel':...}，这里直接 load 可能需要修改。
+      目前的逻辑是假设 torch.load 直接返回 Mel Tensor。
+    """
     def __init__(self, data_dir, subsets=None, crop_size=256, is_eval=False):
         self.files = []
         self.is_eval = is_eval
         
+        # 1. 扫描文件
         if subsets:
             subset_list = subsets.split(",")
             for subset in subset_list:
@@ -51,15 +62,23 @@ class MelDataset(Dataset):
     
     def __getitem__(self, idx):
         try:
+            # 2. 加载 .pt 文件
             mel = torch.load(self.files[idx], map_location="cpu")
+            # TODO: 如果 .pt 是字典，这里需要 mel = mel['mel']
+            
+            # 3. 随机裁剪 (Random Crop)
+            # VAE 训练需要固定长度的片段
             if not self.is_eval:
+                # 训练模式：随机切一段
                 if mel.shape[1] > self.crop_size:
                     start = torch.randint(0, mel.shape[1] - self.crop_size, (1,)).item()
                     mel = mel[:, start:start+self.crop_size]
                 else:
+                    # 长度不够则填充
                     pad_len = self.crop_size - mel.shape[1]
                     mel = torch.nn.functional.pad(mel, (0, pad_len))
             else:
+                # 评估模式：中心裁剪 (Center Crop)
                 if mel.shape[1] > self.crop_size:
                     start = (mel.shape[1] - self.crop_size) // 2
                     mel = mel[:, start:start+self.crop_size]
@@ -69,19 +88,32 @@ class MelDataset(Dataset):
             return {"input_mel": mel}
         except Exception as e:
             console.print(f"[red]Error loading {self.files[idx]}: {e}[/red]")
+            # 出错返回随机噪声防止崩溃
             return {"input_mel": torch.randn(80, self.crop_size)}
 
 def data_collator(features):
+    """
+    功能：将 Dataset 返回的列表堆叠成 Batch Tensor。
+    """
     batch_mels = [f["input_mel"] for f in features]
     batch_mels = torch.stack(batch_mels)
+    # VAE 是自监督任务，输入(mel) 既是 Input 也是 Labels (target)
     return {"mel": batch_mels, "labels": batch_mels}
 
 class VAETrainer(Trainer):
+    """
+    功能：自定义 Trainer，实现 KL 散度预热 (KL Annealing)。
+    """
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # 1. 前向传播
+        # 【对应关系】：调用 `AcousticVAE.forward`
         outputs = model(**inputs)
         rec_loss = outputs.get("rec_loss")
         kl_loss = outputs.get("kl_loss")
         
+        # 2. KL Annealing (KL 权重动态调整)
+        # 在训练初期，KL 权重设为 0，让模型专注于重建 (rec_loss)。
+        # 随着 step 增加，KL 权重逐渐增加到目标值。防止模型一开始就发生 KL Collapse。
         target_kl_weight = self.model.config.kl_weight
         warmup_steps = 5000
         current_step = self.state.global_step
@@ -91,8 +123,8 @@ class VAETrainer(Trainer):
         else:
             current_weight = target_kl_weight
             
+        # 3. 记录日志 (Enhanced logging)
         if self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 0:
-            # Enhanced logging
             logs = {
                 "train/rec_loss": outputs["rec_loss"].item(),
                 "train/kl_loss": outputs["kl_loss"].item(),
@@ -101,23 +133,25 @@ class VAETrainer(Trainer):
             }
             self.log(logs)
             
+        # 4. 计算最终 Loss
         total_loss = rec_loss + current_weight * kl_loss
         return (total_loss, outputs) if return_outputs else total_loss
 
 @hydra.main(version_base=None, config_path="../config", config_name="vae_config")
 def main(cfg: DictConfig):
-    # 将 Hydra Config 转换为 Dict，方便操作
+    # 1. 打印配置
     console.rule("[bold red]VAE Training Start[/bold red]")
     console.print(OmegaConf.to_yaml(cfg))
 
     set_seed(cfg.training.seed)
     
-    # 构建 TrainingArguments
-    # 注意: OmegaConf 对象可以直接解包，但最好转为 dict
+    # 2. 转换 Hydra 配置为 HuggingFace TrainingArguments
     training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
 
     console.print(f"Initializing VAE with strides: {cfg.model.strides}, latent: {cfg.model.latent_channels}")
 
+    # 3. 初始化模型配置
+    # 【对应关系】：映射 yaml 中的 model 部分到 AudioVAEConfig
     config = AudioVAEConfig(
         hidden_channels=cfg.model.hidden_channels, 
         latent_channels=cfg.model.latent_channels,
@@ -133,6 +167,8 @@ def main(cfg: DictConfig):
     for s in cfg.model.strides: total_stride *= s
     console.print(f"Total Compression Rate: {total_stride}x")
     
+    # 4. 加载数据集
+    # 【对应关系】：使用 yaml 中的 data 部分路径
     console.print(f"Loading Training Data from: {cfg.data.train_subsets}")
     train_dataset = MelDataset(
         data_dir=cfg.data.data_dir, 
@@ -149,6 +185,7 @@ def main(cfg: DictConfig):
         is_eval=True
     )
     
+    # 5. 初始化 Trainer
     trainer = VAETrainer(
         model=model,
         args=training_args,
@@ -157,12 +194,14 @@ def main(cfg: DictConfig):
         data_collator=data_collator
     )
     
+    # 6. 开始训练
     if training_args.resume_from_checkpoint:
         console.print(f"Resuming from checkpoint: {training_args.resume_from_checkpoint}")
         trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     else:
         trainer.train()
         
+    # 7. 保存最终模型
     trainer.save_model(training_args.output_dir)
     config.save_pretrained(training_args.output_dir)
     console.print("[bold green]Training finished successfully![/bold green]")

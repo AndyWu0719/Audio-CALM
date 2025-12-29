@@ -1,3 +1,4 @@
+# models/modeling_vae.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,24 +7,33 @@ from typing import List
 import math
 
 # =============================================================================
-# 1. SSIM Loss (Perceptual Loss for Mel Spectrogram)
+# 1. SSIM Loss (结构相似性损失)
 # =============================================================================
 class SSIMLoss(nn.Module):
     """
-    结构相似性损失 (Structural Similarity Loss)。
-    用于在不引入 GAN 的情况下提升 Mel 频谱的清晰度，减少模糊。
+    功能：计算两张频谱图之间的结构相似性损失 (Structural Similarity Loss)。
+    
+    【原理】：
+    普通的 MSE (均方误差) 只关注像素点数值的差异，容易导致生成的频谱“模糊”。
+    SSIM 关注局部的亮度、对比度和结构信息，能让生成的 Mel 频谱纹理更清晰，
+    这对于后续 Vocoder 还原出高质量语音至关重要。
+    
+    【文件间关系】：
+    - 被 `AcousticVAE.forward` 调用，作为重建损失的一部分。
     """
     def __init__(self, window_size=11, size_average=True):
         super(SSIMLoss, self).__init__()
         self.window_size = window_size
         self.size_average = size_average
-        self.channel = 1
+        self.channel = 1 # Mel 频谱被视为单通道图像
         self.window = self.create_window(window_size, self.channel)
 
+    # 1. 生成高斯核，用于计算局部均值和方差
     def gaussian(self, window_size, sigma):
         gauss = torch.Tensor([math.exp(-(x - window_size//2)**2/float(2*sigma**2)) for x in range(window_size)])
         return gauss/gauss.sum()
 
+    # 2. 创建 2D 卷积窗口
     def create_window(self, window_size, channel):
         _1D_window = self.gaussian(window_size, 1.5).unsqueeze(1)
         _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
@@ -31,8 +41,11 @@ class SSIMLoss(nn.Module):
         return window
 
     def forward(self, img1, img2):
-        # img: [B, C, H, W] -> Mel通常是 [B, 80, T]
-        # 我们将其视为单通道图像 [B, 1, 80, T] 进行计算
+        """
+        输入: [Batch, 80, Time] 或 [Batch, 1, 80, Time]
+        输出: Scalar Loss (1 - SSIM)
+        """
+        # 维度调整：确保输入是 [B, C, H, W] 格式 (image-like)
         if img1.dim() == 3:
             img1 = img1.unsqueeze(1)
         if img2.dim() == 3:
@@ -40,18 +53,18 @@ class SSIMLoss(nn.Module):
 
         (_, channel, _, _) = img1.size()
 
+        # 动态创建窗口以匹配设备和数据类型
         if channel == self.channel and self.window.data.type() == img1.data.type():
             window = self.window
         else:
             window = self.create_window(self.window_size, channel)
-            
             if img1.is_cuda:
                 window = window.cuda(img1.get_device())
             window = window.type_as(img1)
-            
             self.window = window
             self.channel = channel
 
+        # 3. 计算局部统计量 (均值 Mu, 方差 Sigma, 协方差 Sigma12)
         mu1 = F.conv2d(img1, window, padding=self.window_size//2, groups=channel)
         mu2 = F.conv2d(img2, window, padding=self.window_size//2, groups=channel)
 
@@ -63,30 +76,38 @@ class SSIMLoss(nn.Module):
         sigma2_sq = F.conv2d(img2*img2, window, padding=self.window_size//2, groups=channel) - mu2_sq
         sigma12 = F.conv2d(img1*img2, window, padding=self.window_size//2, groups=channel) - mu1_mu2
 
+        # 4. SSIM 公式
         C1 = 0.01**2
         C2 = 0.03**2
-
         ssim_map = ((2*mu1_mu2 + C1)*(2*sigma12 + C2))/((mu1_sq + mu2_sq + C1)*(sigma1_sq + sigma2_sq + C2))
 
+        # 5. 返回 Loss (1 - SSIM)
         if self.size_average:
-            return 1.0 - ssim_map.mean() # 返回 1 - SSIM 作为 Loss
+            return 1.0 - ssim_map.mean()
         else:
             return 1.0 - ssim_map.mean(1).mean(1).mean(1)
 
 class AudioVAEConfig(PretrainedConfig):
+    """
+    功能：VAE 的配置类，继承自 HF PretrainedConfig，方便保存和加载。
+    
+    【文件间关系】：
+    - 对应 `vae_config.yaml` 中的 `model` 部分参数。
+    - 被 `train_vae.py` 实例化并传入 `AcousticVAE`。
+    """
     model_type = "audio_vae"
     def __init__(
         self, 
-        in_channels=80, 
-        hidden_channels=512, 
-        latent_channels=64, 
-        strides: List[int] = [2, 2], 
-        kl_weight=0.0001,
-        kl_clamp=2.0,
-        latent_dropout=0.05,
-        norm_num_groups=32,
-        use_l1_loss=True,
-        ssim_weight=1.0,
+        in_channels=80,       # 输入 Mel 维度
+        hidden_channels=512,  # 隐藏层通道数
+        latent_channels=64,   # 压缩后的 Latent 维度 (CALM 模型的输入维度)
+        strides: List[int] = [2, 2], # 下采样倍率，[2,2] 意味着时间轴压缩 4 倍
+        kl_weight=0.0001,     # KL 散度权重的上限
+        kl_clamp=2.0,         # KL Loss 的截断阈值，防止梯度爆炸
+        latent_dropout=0.05,  # Latent 层的 Dropout
+        norm_num_groups=32,   # GroupNorm 的组数
+        use_l1_loss=True,     # 是否使用 L1 Loss (比 MSE 更鲁棒)
+        ssim_weight=1.0,      # SSIM Loss 的权重
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -102,10 +123,13 @@ class AudioVAEConfig(PretrainedConfig):
         self.ssim_weight = ssim_weight
 
 class ResBlock(nn.Module):
+    """
+    功能：标准的残差卷积块 (Residual Block)。
+    结构: Input -> [Norm -> Act -> Conv] x 2 -> Add Input
+    """
     def __init__(self, channels, num_groups=32):
         super().__init__()
         self.conv = nn.Sequential(
-            # Norm -> Act -> Conv
             nn.GroupNorm(num_groups, channels, eps=1e-6),
             nn.GELU(),
             nn.Conv1d(channels, channels, 3, 1, 1),
@@ -118,6 +142,15 @@ class ResBlock(nn.Module):
         return x + self.conv(x)
 
 class AcousticVAE(PreTrainedModel):
+    """
+    功能：声学 VAE 主模型。
+    包含 Encoder (压缩), Reparameterization (采样), Decoder (还原)。
+    
+    【文件间关系】：
+    - 被 `train_vae.py` 训练。
+    - 被 `preprocess/core.py` 加载，用于离线提取 Latent。
+    - 被 `modeling_calm.py` 中的 `QwenCALM` 引用 (在 Stage 2 训练/推理时，如果开启了 VAE 模式)。
+    """
     config_class = AudioVAEConfig
     
     def __init__(self, config):
@@ -127,22 +160,23 @@ class AcousticVAE(PreTrainedModel):
         for s in self.strides: self.total_stride *= s
         print(f"[AcousticVAE] Total Downsampling Stride: {self.total_stride}")
         
-        # === 1. Encoder ===
+        # === 1. 构建 Encoder (下采样) ===
         encoder_layers = []
         current_channels = config.in_channels
         
-        # First convolution layer to increase dimension
+        # 初始卷积：提升通道数
         encoder_layers.append(
             nn.Conv1d(config.in_channels, config.hidden_channels, 3, 1, 1)
         )
         current_channels = config.hidden_channels
 
+        # 下采样层循环
         for stride in config.strides:
             kernel_size = stride * 2
             padding = stride // 2
             encoder_layers.append(
                 nn.Sequential(
-                    # Downsampling convolution
+                    # 步长卷积进行下采样
                     nn.Conv1d(
                         current_channels, 
                         config.hidden_channels, 
@@ -150,12 +184,12 @@ class AcousticVAE(PreTrainedModel):
                         stride=stride, 
                         padding=padding
                     ),
-                    # Residual block (with Norm)
+                    # 残差块提取特征
                     ResBlock(config.hidden_channels, config.norm_num_groups)
                 )
             )
             
-        # Projection to Latent
+        # 投影到 Latent 空间 (输出 2 * latent_channels，因为要预测均值和方差)
         self.encoder = nn.Sequential(
             *encoder_layers,
             nn.GroupNorm(config.norm_num_groups, config.hidden_channels, eps=1e-6), 
@@ -163,9 +197,9 @@ class AcousticVAE(PreTrainedModel):
             nn.Conv1d(config.hidden_channels, config.latent_channels * 2, 3, 1, 1)
         )
         
-        # === 2. Decoder ===
+        # === 2. 构建 Decoder (上采样) ===
         decoder_layers = []
-        # Input Projection
+        # 初始投影：从 Latent 恢复通道数
         decoder_layers.append(
             nn.Sequential(
                 nn.Conv1d(config.latent_channels, config.hidden_channels, 3, 1, 1),
@@ -173,12 +207,13 @@ class AcousticVAE(PreTrainedModel):
             )
         )
         
-        # Upsampling
+        # 上采样层循环 (倒序)
         for stride in reversed(config.strides):
             kernel_size = stride * 2
             padding = stride // 2
             decoder_layers.append(
                 nn.Sequential(
+                    # 转置卷积进行上采样
                     nn.ConvTranspose1d(
                         config.hidden_channels, 
                         config.hidden_channels, 
@@ -190,36 +225,60 @@ class AcousticVAE(PreTrainedModel):
                 )
             )
             
-        # Output Layer
+        # 输出层：还原回 Mel 维度 (in_channels)
         self.decoder_net = nn.Sequential(*decoder_layers)
         self.final_proj = nn.Conv1d(config.hidden_channels, config.in_channels, 3, 1, 1)
+        
+        # 损失函数组件
         self.use_l1_loss = config.use_l1_loss
         self.ssim_loss = SSIMLoss()
         self.ssim_weight = getattr(config, 'ssim_weight', 1.0)
 
     def encode(self, x):
+        """
+        功能：将 Mel 频谱编码为高斯分布参数。
+        输入: [B, 80, T]
+        输出: mu [B, 64, T'], logvar [B, 64, T']
+        """
         h = self.encoder(x)
-        mu, logvar = torch.chunk(h, 2, dim=1)
+        mu, logvar = torch.chunk(h, 2, dim=1) # 切分通道
         return mu, logvar
 
     def reparameterize(self, mu, logvar):
+        """
+        功能：重参数化技巧 (Reparameterization Trick)。
+        使得采样过程 z ~ N(mu, std) 变得可微，从而能进行反向传播。
+        z = mu + epsilon * std
+        """
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
             z = mu + eps * std
             
+            # Latent 上的 Dropout (增强鲁棒性)
             if self.config.latent_dropout > 0:
                 z = F.dropout(z, p=self.config.latent_dropout, training=True)
             return z
-        return mu 
+        return mu # 推理时直接使用均值
 
     def decode(self, z):
+        """
+        功能：从 Latent 还原 Mel 频谱。
+        """
         h = self.decoder_net(z)
         return self.final_proj(h)
 
     def forward(self, mel, labels=None, return_dict=True, **kwargs):
+        """
+        功能：训练时的前向传播，包含 Loss 计算。
+        
+        【文件间关系】：
+        - 被 `train_vae.py` 中的 `VAETrainer.compute_loss` 调用。
+        """
         batch, channels, seq_len = mel.shape
         
+        # 1. 填充 (Padding)
+        # 确保输入长度能被总下采样率整除，否则卷积会报错
         remainder = seq_len % self.total_stride
         if remainder != 0:
             pad_len = self.total_stride - remainder
@@ -227,27 +286,38 @@ class AcousticVAE(PreTrainedModel):
         else:
             mel_padded = mel
 
+        # 2. VAE 核心流程: Encode -> Sample -> Decode
         mu, logvar = self.encode(mel_padded)
         z = self.reparameterize(mu, logvar)
         recon_mel = self.decode(z)
         
+        # 3. 裁剪 (Cropping)
+        # 去掉因为 Padding 多出来的部分，保证输入输出长度一致
         if recon_mel.shape[2] != seq_len:
             recon_mel = recon_mel[:, :, :seq_len]
             
+        # 4. 计算 Loss
+        # 4.1 重建损失 (Reconstruction Loss)
         if self.use_l1_loss:
             rec_loss = F.l1_loss(recon_mel, mel)
         else:
             rec_loss = F.mse_loss(recon_mel, mel)
+        
+        # 4.2 感知损失 (SSIM Loss)
         ssim_loss = self.ssim_loss(recon_mel, mel)
         
+        # 4.3 KL 散度损失 (KL Divergence Loss)
+        # 约束 Latent 分布接近标准正态分布 N(0, 1)
         kl_element = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
         kl_per_step = torch.sum(kl_element, dim=1)
         
+        # KL 截断 (防止 Loss 爆炸)
         if self.config.kl_clamp > 0:
             kl_per_step = torch.clamp(kl_per_step, min=self.config.kl_clamp)
             
         kl_loss = kl_per_step.mean()
         
+        # 总损失 (注意：KL 的权重通常在 Trainer 中动态调整)
         total_loss = rec_loss + self.ssim_weight * ssim_loss + self.config.kl_weight * kl_loss
 
         if return_dict:

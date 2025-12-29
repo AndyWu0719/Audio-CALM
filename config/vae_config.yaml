@@ -1,3 +1,4 @@
+# config/vae_config.yaml
 defaults:
   - _self_
 
@@ -8,25 +9,35 @@ hydra:
   job:
     chdir: False
 
+# === 模型参数 (Model Args) ===
+# 【对应关系】：这里的参数直接传给 modeling_vae.py 中的 `AudioVAEConfig`
 model:
-  hidden_channels: 512
-  latent_channels: 64
-  strides: [2]
-  kl_weight: 0.0001
-  kl_clamp: 2.0
-  latent_dropout: 0.0
-  norm_num_groups: 32
+  hidden_channels: 512  # 卷积层通道数
+  latent_channels: 64   # 潜变量维度 (Stage 2 CALM 模型的输入就是这个维度)
+  strides: [2, 2]       # 下采样层数和倍率，[2,2] 表示总共下采样 4 倍
+  kl_weight: 0.0001     # KL Loss 的最大权重
+  kl_clamp: 2.0         # KL Loss 截断值
+  latent_dropout: 0.0   # Latent 处的 Dropout
+  norm_num_groups: 32   # GroupNorm 组数
 
+# === 数据参数 (Data Args) ===
+# 【对应关系】：这里的路径被 train_vae.py 中的 `MelDataset` 读取
 data:
+  # 训练数据根目录 (通常包含 LibriTTS_R/train)
   data_dir: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/train"
+  # 验证数据根目录
   eval_data_dir: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/dev-clean"
+  # 子数据集名称 (对应文件夹名)
   train_subsets: "train-clean-100,train-clean-360,train-other-500"
   eval_subsets: "dev-clean"
+  # 训练时的裁剪长度 (Mel 帧数)
   crop_size: 512
 
+# === 训练参数 (Training Args) ===
+# 【对应关系】：这里的参数被自动转换为 HF 的 `TrainingArguments`
 training:
   output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/audio_vae_2x_kl_annealing_l1_ssim"
-  per_device_train_batch_size: 512
+  per_device_train_batch_size: 512  # 显存允许的情况下尽可能大
   per_device_eval_batch_size: 512
   gradient_accumulation_steps: 1
   learning_rate: 5e-4
@@ -42,9 +53,9 @@ training:
   metric_for_best_model: "loss"
   remove_unused_columns: False
   dataloader_num_workers: 8
-  bf16: True
+  bf16: True # 开启 BF16 加速
   ddp_find_unused_parameters: False
   report_to: "wandb"
-  run_name: "audio_vae_2x_kl_annealing_l1_ssim"
+  run_name: "audio_vae_4x_kl_annealing_l1_ssim"
   save_strategy: "steps"
   seed: 42
