@@ -23,6 +23,7 @@ import evaluate
 from rich.logging import RichHandler
 from rich.console import Console
 import matplotlib.pyplot as plt
+from transformers import pipeline
 
 # --- Environment Patches ---
 # 修复部分环境中 torchaudio 后端检测的问题
@@ -381,11 +382,7 @@ def generate_one_step_flow(model, condition, steps, cfg_scale, device):
 @torch.no_grad()
 def run_tts_inference(model, tokenizer, vocoder, text, steps=10, cfg_scale=1.0, device="cuda", save_plot_path=None):
     """
-    功能：TTS 推理主函数 (自回归生成)。
-    步骤：
-    1. 预填充 (Prefill): 处理 Prompt，获取 SOA Token 的输出作为初始 Condition。
-    2. 自回归循环 (Autoregressive Loop): 逐帧生成音频 Latent。
-    3. 解码 (Decode): Latent -> VAE Decode -> Mel -> Vocoder -> Waveform。
+    功能：TTS 推理主函数 (自回归生成 + 智能停止)。
     """
     # 切换 Adapter
     if hasattr(model.llm, "set_adapter") and hasattr(model.llm, "peft_config"):
@@ -398,8 +395,7 @@ def run_tts_inference(model, tokenizer, vocoder, text, steps=10, cfg_scale=1.0, 
     text_ids = tokenizer(formatted_text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
     text_embeds = model.get_input_embeddings()(text_ids)
     
-    # 2. 添加 SOA (Start of Audio) Token
-    # 这是生成的触发器
+    # 2. 添加 SOA Token
     soa_token = model.soa_embed.expand(1, -1, -1) 
     inputs_embeds = torch.cat([text_embeds, soa_token], dim=1)
     
@@ -407,85 +403,124 @@ def run_tts_inference(model, tokenizer, vocoder, text, steps=10, cfg_scale=1.0, 
     out = model.llm(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=None, output_hidden_states=True)
     past_kv = out.past_key_values
     
-    # 获取第一个 Condition (来自 SOA 的输出隐状态)
+    # 获取第一个 Condition
     condition = out.hidden_states[-1][:, -1:, :] 
     
-    # 4. 生成第一帧音频 Latent
+    # 4. 生成第一帧
     curr_latent = generate_one_step_flow(model, condition, steps, cfg_scale, device)
     history_latents = [curr_latent]
 
-    # 5. 自回归循环
-    # 限制最大长度防止死循环
-    max_frames = 500 
+    # 5. 自回归循环 (带刹车机制)
+    # 理论最大长度: 假设 10 秒 = 156 帧, 250 帧足够了
+    max_frames = 250 
     pbar = tqdm(range(max_frames), desc="Gen Audio", leave=False)
     
+    # 获取 EOS Token ID
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None: 
+        eos_token_id = 151645 # Qwen 默认 EOS
+
+    stop_reason = "max_length" # 记录停止原因
+
     for i in pbar:
         # 输入: 当前生成的 Latent
         input_latent = curr_latent
-        # [Offset] 告诉 Projector 当前是第 i 帧 (i=0 对应 Audio 的第0帧)
-        # 【对应关系】：调用 modeling_calm.py 中 AudioInputProjector.forward(x, offset)
         curr_embeds = model.input_proj(input_latent, offset=i)
         
-        # LLM Step: 预测下一个 Condition
+        # LLM Step
+        # 注意：这里我们同时需要 hidden_states (给 Flow 用) 和 logits (给停止检测用)
         out = model.llm(inputs_embeds=curr_embeds, use_cache=True, past_key_values=past_kv, output_hidden_states=True)
         past_kv = out.past_key_values
         
-        # 获取 Condition
+        # A. 获取 Condition 给 Flow Head
         condition = out.hidden_states[-1][:, -1:, :]
         
-        # TODO: 可以在这里添加 Stop Token 检测逻辑
+        # B. [新增] 停止检测逻辑 (Stop Token Detection)
+        # 获取 LM Head 的预测结果
+        logits = out.logits[:, -1, :] # [1, Vocab]
+        pred_token_id = torch.argmax(logits, dim=-1).item()
         
+        # 这里的逻辑是：如果 LLM 预测下一个词是 EOS，说明它觉得音频该结束了
+        if pred_token_id == eos_token_id:
+            stop_reason = "eos_token"
+            # console.print(f"[yellow]🛑 Stop Token Detected at step {i}[/yellow]")
+            break
+            
+        # C. [可选] 静音检测 (Silence Detection) 作为双保险
+        # 如果 Latent 的能量极低且已经生成了一定长度，也可以停
+        # (需要根据你的 Latent 统计特性调整阈值，比如 0.05)
+        latent_energy = torch.mean(torch.abs(input_latent)).item()
+        if i > 50 and latent_energy < 0.05:
+            stop_reason = "silence"
+            # console.print(f"[yellow]🛑 Silence Detected at step {i}[/yellow]")
+            break
+
         # Flow 生成下一帧
         curr_latent = generate_one_step_flow(model, condition, steps, cfg_scale, device)
         history_latents.append(curr_latent)
 
+    # console.print(f"Generated {len(history_latents)} frames. Reason: {stop_reason}")
+
     # 6. 解码为波形
-    # [1, Latent, T]
     latents = torch.cat(history_latents, dim=1).transpose(1, 2).to(torch.float32) 
+    mel = model.vae.decode(latents)
     
-    # VAE Decode -> Mel Spectrogram
-    # 【对应关系】：调用 modeling_vae.py 中的 AcousticVAE.decode
-    mel = model.vae.decode(latents) # [1, 80, T]
-    
-    # 调试可视化: 保存 Mel 频谱图
     if save_plot_path:
         mel_cpu = mel.squeeze().float().cpu().numpy()
         plt.figure(figsize=(10, 4))
         plt.imshow(mel_cpu, aspect='auto', origin='lower', interpolation='none')
         plt.colorbar()
-        plt.title(f"Generated Mel (Text: {text[:20]}...)")
+        plt.title(f"Generated Mel (Text: {text[:20]}...) [Stop: {stop_reason}]")
         plt.tight_layout()
         plt.savefig(save_plot_path)
         plt.close()
     
-    # Vocoder Decode -> Waveform
     wav = vocoder.decode(mel)
-    
     return wav.cpu()
 
 def eval_task_tts(cfg, model, tokenizer, vocoder, data):
     """
-    功能：TTS 任务评估循环，生成音频并保存。
+    功能：TTS 任务评估循环，生成音频 -> ASR 转录 -> 计算 WER。
     """
     wav_dir = os.path.join(cfg.evaluation.output_dir, "generated_wavs")
     os.makedirs(wav_dir, exist_ok=True)
+    
+    # [修改] CSV Header 增加 metrics
     csv_file = open(os.path.join(cfg.evaluation.output_dir, "tts_results.csv"), "w", newline="", encoding="utf-8")
     writer = csv.writer(csv_file)
-    writer.writerow(["id", "text", "wav_path"])
+    writer.writerow(["id", "text_ref", "text_pred", "wer", "wav_path"])
     
     console.print(f"[bold green]>>> Running TTS Evaluation (Steps={cfg.evaluation.flow_steps})[/bold green]")
     img_dir = os.path.join(cfg.evaluation.output_dir, "mel_plots")
     os.makedirs(img_dir, exist_ok=True)
-    
+
+    # [新增] 加载评估用的 ASR 模型 (Whisper)
+    # 建议使用 whisper-small.en 或 whisper-base.en，速度快且精度够用
+    asr_model_id = cfg.evaluation.get("eval_asr_model", "openai/whisper-tiny.en")
+    console.print(f"[bold yellow]Loading ASR Evaluator: {asr_model_id}...[/bold yellow]")
+    asr_pipe = pipeline(
+        "automatic-speech-recognition", 
+        model=asr_model_id, 
+        device=cfg.device
+    )
+
+    # 文本标准化器 (移除标点，统一小写)
+    import re
+    def normalize(text): return re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
+
+    wers = []
+
     for i, item in enumerate(data):
-        text = item.get("text", "")
-        if not text: continue
+        text_ref = item.get("text", "")
+        if not text_ref: continue
+        
         try:
             scale = cfg.evaluation.get("cfg_scale", 1.0)
             steps = cfg.evaluation.get("flow_steps", 10)
             
+            # 1. 生成音频
             wav = run_tts_inference(
-                model, tokenizer, vocoder, text, 
+                model, tokenizer, vocoder, text_ref, 
                 steps=steps, 
                 cfg_scale=scale, 
                 device=cfg.device,
@@ -496,14 +531,36 @@ def eval_task_tts(cfg, model, tokenizer, vocoder, data):
             save_path = os.path.join(wav_dir, f"sample_{i}.wav")
             sf.write(save_path, wav_np, 16000)
             
-            writer.writerow([i, text, save_path])
+            # 2. [新增] ASR 转录 (把生成的音频转回文字)
+            # Whisper 需要 numpy array
+            transcription = asr_pipe(wav_np)["text"]
+            
+            # 3. [新增] 计算 WER
+            norm_ref = normalize(text_ref)
+            norm_pred = normalize(transcription)
+            
+            if len(norm_ref) > 0:
+                wer = wer_metric.compute(predictions=[norm_pred], references=[norm_ref])
+            else:
+                wer = 1.0
+                
+            wers.append(wer)
+            
+            # 4. 写入 CSV
+            writer.writerow([i, text_ref, transcription, f"{wer:.4f}", save_path])
+            
             if (i+1) % 5 == 0: 
-                console.print(f"[Sample {i+1}] Generated: {save_path}")
+                avg_wer = sum(wers) / len(wers)
+                console.print(f"[Sample {i+1}] Avg WER: {avg_wer:.2%} | Ref: {text_ref[:20]}... | Pred: {transcription[:20]}...")
                 
         except Exception as e:
             logger.error(f"Error sample {i}: {e}")
 
     csv_file.close()
+    
+    if len(wers) > 0:
+        final_wer = sum(wers) / len(wers)
+        console.print(f"[bold blue]✅ Final TTS WER: {final_wer:.2%}[/bold blue]")
 
 # ==============================================================================
 # Main Entry

@@ -88,11 +88,12 @@ def worker_process(rank, gpu_id, file_list, args, cv_mapping, queue):
     try:
         # 1. 加载模型到指定 GPU
         device = torch.device(f"cuda:{gpu_id}")
-        # 【对应关系】：调用 core.load_vae 加载 VAE
-        vae = load_vae(args.vae_ckpt, device)
+        # 根据模式决定是否加载 VAE
+        if not args.mel_only:
+            vae = load_vae(args.vae_ckpt, device)
+            vae.eval()
         # 【对应关系】：调用 core.MelExtractor 初始化特征提取器
         mel_extractor = MelExtractor().to(device)
-        vae.eval()
         mel_extractor.eval()
     except Exception:
         queue.put(None)
@@ -147,14 +148,24 @@ def worker_process(rank, gpu_id, file_list, args, cv_mapping, queue):
                 if mel.shape[-1] % pad_to != 0:
                     pad_len = pad_to - (mel.shape[-1] % pad_to)
                     mel = torch.nn.functional.pad(mel, (0, pad_len), mode='reflect')
-                
-                # VAE 编码 -> 获取均值 (mu) 作为 Latent
-                mu, _ = vae.encode(mel)
-                latent = mu.squeeze(0).cpu() # 移回 CPU 以便保存
-
-                # --- 6. 保存 Latent ---
-                payload = {"latent": latent, "vae_path": args.vae_ckpt}
-                torch.save(payload, save_path)
+                    
+                if args.mel_only:
+                    # === 分支 A: 仅保存 Mel (用于训练 VAE) ===
+                    # 必须保存为 "mel" key，以便 train_vae.py 识别
+                    payload = {"mel": mel.squeeze(0).cpu()} 
+                    torch.save(payload, save_path)
+                else:
+                    # === 分支 B: 保存 Latent (用于训练 CALM) ===
+                    # 必须有 VAE 才能运行
+                    with torch.no_grad():
+                        mu, _ = vae.encode(mel)
+                        latent = mu.squeeze(0).cpu() # [Dim, Time]
+                    payload = {
+                        "latent": latent, 
+                        "vae_path": args.vae_ckpt,
+                        # "mel": mel.squeeze(0).cpu() # 可选：如果硬盘空间够，建议加上
+                    }
+                    torch.save(payload, save_path)
 
                 # --- 7. 处理文本 (Transcript) ---
                 # 根据不同数据集类型获取文本
@@ -219,12 +230,17 @@ def main():
     parser.add_argument("--dataset_name", type=str, required=True, help="数据集名称 (libritts, librispeech, commonvoice)")
     parser.add_argument("--in_dir", type=str, required=True, help="原始音频输入目录")
     parser.add_argument("--out_dir", type=str, required=True, help="Latent 输出目录")
-    parser.add_argument("--vae_ckpt", type=str, required=True, help="VAE 模型检查点路径")
+    parser.add_argument("--vae_ckpt", type=str, default=None, help="VAE 模型检查点路径 (mel_only模式下可忽略)")
+    parser.add_argument("--mel_only", action="store_true", help="仅提取 Mel 频谱(用于训练 VAE), 不需要加载 VAE 模型")
     parser.add_argument("--cv_tsv", type=str, default=None, help="CommonVoice 的 TSV 元数据路径")
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count(), help="使用的 GPU 数量")
     parser.add_argument("--workers_per_gpu", type=int, default=4, help="每个 GPU 启动的进程数")
     parser.add_argument("--force", action="store_true", help="是否强制覆盖已存在的文件")
     args = parser.parse_args()
+    
+    if not args.mel_only and args.vae_ckpt is None:
+        print("❌ Error: 提取 Latent (非 --mel_only 模式) 必须指定 --vae_ckpt")
+        return
 
     # 1. 扫描文件
     files = scan_files(args.in_dir)

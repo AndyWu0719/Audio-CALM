@@ -22,7 +22,7 @@ model:
 
   # === 基础模型路径 ===
   qwen_path: "${hydra:runtime.cwd}/qwen2_7B_Instruct"
-  vae_path: "${hydra:runtime.cwd}/outputs/checkpoints/audio_vae_4x_kl_annealing_l1_ssim/checkpoint-6900"
+  vae_path: "${hydra:runtime.cwd}/outputs/checkpoints/vae_4x_64_5e-4/checkpoint-8700"
   
   # === LoRA 配置 ===
   use_lora: True
@@ -42,7 +42,7 @@ model:
   # === Flow Head 配置 ===
   # 即使只练 ASR，模型初始化也需要这些参数
   flow_hidden_dim: 2048 
-  flow_num_layers: 4 
+  flow_num_layers: 6 
 
   # === [关键] 软重启 (Soft Restart) ===
   # ASR 通常是从头训练 Projector，或者加载通用的预训练权重
@@ -83,29 +83,38 @@ data:
   eval_subsets: "dev-clean"
   
   # 序列约束
-  max_text_len: 512
-  max_audio_len: 1024
+  max_text_len: 128
+  max_audio_len: 512
   latent_downsample: 4
 
 # -------------------------------------------------------------------
 # TRAINING CONFIGURATION (训练参数)
 # -------------------------------------------------------------------
 training:
-  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/calm_asr"
-  run_name: "calm-asr-libri960h-epoch15"
+  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa/asr"
+  run_name: "asr-4x-64-1e-4-2048-6"
   
-  resume_from_checkpoint: null 
+  resume_from_checkpoint: "/data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/asr-4-64-1e-4-2048-6/checkpoint-1500" 
   ignore_data_skip: False
   
   # Batch 设置
-  per_device_train_batch_size: 1
+  per_device_train_batch_size: 2
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 32 
+  gradient_accumulation_steps: 16 
   
   # 优化器
   learning_rate: 1e-4
-  # [关键] ASR 需要更久的训练来对齐特征，建议 15-20 Epochs
-  num_train_epochs: 15
+  # ASR 需要更久的训练来对齐特征，建议 15-20 Epochs
+  num_train_epochs: 10
+
+  # SOA Token: 冷启动需要大倍率 (10.0 ~ 50.0)
+  soa_lr_mult: 10.0  
+  
+  # Projector: 微调时使用较小倍率
+  projector_lr_mult: 5.0 
+  
+  # Flow Head: 始终从头练，保持标准倍率
+  head_lr_mult: 0.0
   
   # 硬件加速
   bf16: True
@@ -119,18 +128,18 @@ training:
   # 日志与保存
   logging_steps: 10
   save_strategy: "steps"
-  save_steps: 2000
+  save_steps: 500
   save_total_limit: 2
   
   # 评估
   eval_strategy: "steps"
-  eval_steps: 2000
+  eval_steps: 500
   load_best_model_at_end: True
   metric_for_best_model: "loss"
   
   # 其他
   group_by_length: False
-  label_smoothing_factor: 0.1 # ASR 推荐开启 Label Smoothing
+  label_smoothing_factor: 0.1
   ddp_find_unused_parameters: True
   dataloader_num_workers: 8
   dataloader_pin_memory: True
@@ -144,11 +153,11 @@ training:
 # -------------------------------------------------------------------
 evaluation:
   task: "asr"
-  test_file: "${hydra:runtime.cwd}/data/jsonl/dev_asr.jsonl" # 确保此文件存在
+  test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl" # 确保此文件存在
   
   # 推理用 Checkpoint (训练后填写)
   checkpoint_path: null
-  output_dir: "${hydra:runtime.cwd}/outputs/eval_results_asr"
+  output_dir: "${hydra:runtime.cwd}/outputs/eval_results/asr"
   
   max_samples: 200
   max_latents: 1024
@@ -157,7 +166,7 @@ evaluation:
   cfg_scale: 1.0
   eval_asr_model: "openai/whisper-tiny.en"
   
-  wandb_project: "Audio-CALM-ASR"
+  wandb_project: "Audio-CALM-Eval"
   wandb_entity: null
   web_demo: False
   seed: 42

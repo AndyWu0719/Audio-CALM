@@ -307,10 +307,17 @@ class CalmTrainer(Trainer):
     2. 实现参数分组优化（区分 Head 和 Base Model）。
     3. 自定义模型保存逻辑（保存非 LoRA 参数）。
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, lr_multipliers=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # 用于记录分任务的 Loss
         self.loss_meters = {"tts": 0.0, "asr": 0.0, "tts_cnt": 0, "asr_cnt": 0}
+        
+        # 保存倍率配置，如果没有传入则给默认值 1.0
+        self.lr_multipliers = lr_multipliers or {"soa": 1.0, "proj": 1.0, "head": 1.0}
+        
+        # 打印一下确认收到
+        if _get_rank_safe() == 0:
+            console.print("[magenta]🔧 LR Multipliers:[/magenta]", self.lr_multipliers)
 
     def create_optimizer(self):
         """
@@ -320,37 +327,82 @@ class CalmTrainer(Trainer):
         if self.optimizer is None:
             decay_parameters = []
             no_decay_parameters = []
-            projector_parameters = []
+            input_proj_parameters = []  # 专门放 Input Projector
+            head_parameters = []        # 专门放 Flow Head
+            soa_parameters = []         # 专门放 SOA
             
             # [关键] 标记哪些参数属于“头部组件”
-            head_keywords = ["input_proj", "output_head", "soa_embed"]
-            
             model_to_opt = self.model_wrapped if hasattr(self, "model_wrapped") else self.model
             if hasattr(model_to_opt, "module"): model_to_opt = model_to_opt.module
 
             for name, param in model_to_opt.named_parameters():
                 if not param.requires_grad: continue
                 
-                is_head = any(k in name for k in head_keywords) and "lora" not in name
+                # 1. 抓取 SOA
+                if "soa_embed" in name:
+                    soa_parameters.append(param)
+                    continue
                 
-                if is_head:
-                    projector_parameters.append(param)
-                else:
-                    if "bias" in name or "LayerNorm" in name:
-                        no_decay_parameters.append(param)
-                    else:
-                        decay_parameters.append(param)
+                # 2. 抓取 Input Projector
+                if "input_proj" in name and "lora" not in name:
+                    input_proj_parameters.append(param)
+                    continue
 
-            # 参数分组
+                # 3. 抓取 Output Head
+                if "output_head" in name and "lora" not in name:
+                    head_parameters.append(param)
+                    continue
+
+                # 4. 其他参数 (Base Model / LoRA)
+                if "bias" in name or "LayerNorm" in name:
+                    no_decay_parameters.append(param)
+                else:
+                    decay_parameters.append(param)
+                    
+            # 使用 self.lr_multipliers 设置倍率
+            mult_soa = self.lr_multipliers.get("soa", 1.0)
+            mult_proj = self.lr_multipliers.get("proj", 1.0)
+            mult_head = self.lr_multipliers.get("head", 1.0)
+            
+            # 设置不同的学习率倍率
             optimizer_grouped_parameters = [
-                {"params": decay_parameters, "weight_decay": self.args.weight_decay, "lr": self.args.learning_rate},
-                {"params": no_decay_parameters, "weight_decay": 0.0, "lr": self.args.learning_rate},
-                # Head 部分可以设置更高的 LR (这里暂时设为 1.0 * base_lr)
-                {"params": projector_parameters, "weight_decay": self.args.weight_decay, "lr": 1.0 * self.args.learning_rate}, 
+                # 1. Base Model & LoRA (Standard 1.0x)
+                {
+                    "params": decay_parameters, 
+                    "weight_decay": self.args.weight_decay, 
+                    "lr": self.args.learning_rate
+                },
+                {
+                    "params": no_decay_parameters, 
+                    "weight_decay": 0.0, 
+                    "lr": self.args.learning_rate
+                },
+                
+                # 2. Input Projector (动态倍率)
+                {
+                    "params": input_proj_parameters, 
+                    "weight_decay": self.args.weight_decay, 
+                    "lr": mult_proj * self.args.learning_rate 
+                },
+                
+                # 3. Output Head (动态倍率)
+                {
+                    "params": head_parameters, 
+                    "weight_decay": self.args.weight_decay, 
+                    "lr": mult_head * self.args.learning_rate 
+                },
+                
+                # 4. SOA Embed (动态倍率)
+                {
+                    "params": soa_parameters, 
+                    "weight_decay": 0.0, 
+                    "lr": mult_soa * self.args.learning_rate 
+                },
             ]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+            
         return self.optimizer
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -512,8 +564,21 @@ def main(cfg: DictConfig):
     
     set_seed(cfg.training.seed)
     
-    # 转换参数
-    training_args = TrainingArguments(**OmegaConf.to_container(cfg.training, resolve=True))
+    # 1. 将 Hydra 配置转为普通字典
+    train_conf = OmegaConf.to_container(cfg.training, resolve=True)
+    
+    # 2. 提取并移除自定义参数 (TrainingArguments 不认这几个参数)
+    # 我们先定义哪些是自定义的
+    custom_keys = ["soa_lr_mult", "projector_lr_mult", "head_lr_mult"]
+    
+    # 安全地从字典中移除它们
+    for k in custom_keys:
+        if k in train_conf:
+            del train_conf[k]
+    
+    # 3. 使用清理后的字典初始化 TrainingArguments
+    training_args = TrainingArguments(**train_conf)
+
     training_args.ddp_find_unused_parameters = True 
     training_args.ignore_data_skip = True
     
@@ -627,7 +692,7 @@ def main(cfg: DictConfig):
     )
     
     # 初始化验证集
-    eval_max_samples = cfg.training.get("eval_max_samples", 200)
+    eval_max_samples = cfg.training.get("eval_max_samples", 1000)
     eval_ds = CalmDataset(
         latent_dir=cfg.data.eval_latent_dir or cfg.data.latent_dir, 
         subsets=cfg.data.eval_subsets, 
@@ -644,10 +709,19 @@ def main(cfg: DictConfig):
     train_collator = CalmCollator(tokenizer.pad_token_id, training=True)
     eval_collator = CalmCollator(tokenizer.pad_token_id, training=False)
 
+    lr_multipliers = {
+        "soa": cfg.training.get("soa_lr_mult", 1.0),
+        "proj": cfg.training.get("projector_lr_mult", 1.0),
+        "head": cfg.training.get("head_lr_mult", 1.0),
+    }
+
     trainer = CalmTrainer(
-        model=model, args=training_args,
-        train_dataset=train_ds, eval_dataset=eval_ds,
-        data_collator=train_collator
+        model=model, 
+        args=training_args,
+        train_dataset=train_ds, 
+        eval_dataset=eval_ds,
+        data_collator=train_collator,
+        lr_multipliers=lr_multipliers
     )
     
     trainer.eval_collator = eval_collator

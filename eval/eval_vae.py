@@ -64,8 +64,8 @@ def run_inference(audio_path, vae_model, hifi_gan, extractor, device):
         recon_mel = outputs['recon_mel']
         
         # Vocoder
-        wav_recon = hifi_gan.decode_batch(recon_mel)
-        wav_oracle = hifi_gan.decode_batch(gt_mel)
+        wav_recon = hifi_gan.decode_batch(recon_mel * 0.43429)
+        wav_oracle = hifi_gan.decode_batch(gt_mel * 0.43429)
         
     return wav.cpu(), wav_recon.cpu(), wav_oracle.cpu(), gt_mel, recon_mel
 

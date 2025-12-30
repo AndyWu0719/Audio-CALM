@@ -21,6 +21,20 @@ EPS = 1e-8
 # ---------------------------------------------------------------------
 # Audio Input Projector (Fixed with Offset Support)
 # ---------------------------------------------------------------------
+class CausalConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding=0)
+        # 左侧 Padding 大小 = kernel_size - 1
+        self.pad_len = kernel_size - 1
+
+    def forward(self, x):
+        # x: [B, C, T]
+        # 在时间轴 (最后一维) 的左侧填充
+        x = F.pad(x, (self.pad_len, 0)) 
+        return self.conv(x)
+    
 class AudioInputProjector(nn.Module):
     """
     功能：音频特征投影器。
@@ -34,11 +48,17 @@ class AudioInputProjector(nn.Module):
         super().__init__()
         
         # 1. 局部特征提取 (Local Feature Extraction)
-        # 使用 1D 卷积聚合局部上下文，使特征更鲁棒。
+        # 1. kernel_size=3, stride=1
+        # 2. padding=0 (我们手动 Pad)
+        # 3. 这样第 t 帧的输出只依赖于 [t-2, t-1, t] (取决于具体实现，或者 [t-1, t, t+1] if right pad)
+        # 我们需要实现左侧 Padding，使得输出 t 只看 [t-2, t-1, t]
+        
         self.conv_block = nn.Sequential(
-            nn.Conv1d(latent_dim, llm_dim, kernel_size=3, padding=1),
+            # 第一层
+            CausalConv1d(latent_dim, llm_dim, kernel_size=3),
             nn.GELU(),
-            nn.Conv1d(llm_dim, llm_dim, kernel_size=3, padding=1),
+            # 第二层
+            CausalConv1d(llm_dim, llm_dim, kernel_size=3),
         )
         
         # 2. 位置编码 (Positional Information)
@@ -277,7 +297,13 @@ class QwenCALM(PreTrainedModel):
         
         # 4. [NEW] 音频起始 Token (SOA)
         # 这是一个可学习向量，作为 Text 和 Audio 的分隔符，触发音频生成。
-        self.soa_embed = nn.Parameter(torch.randn(1, 1, qwen_dim) * 0.02)
+        with torch.no_grad():
+            dummy_ids = torch.arange(1000, 2000, device=self.llm.device)
+            mean_embed = self.get_input_embeddings()(dummy_ids).mean(dim=0, keepdim=True).unsqueeze(0)
+            self.soa_embed = nn.Parameter(mean_embed.clone()) # [1, 1, Dim]
+            
+        # 确保它可训练
+        self.soa_embed.requires_grad_(True)
         
         # 5. 初始化流匹配头 (TTS 核心组件)
         print(f"[QwenCALM] Flow Head (dim={config.flow_hidden_dim}, L={config.flow_num_layers})")

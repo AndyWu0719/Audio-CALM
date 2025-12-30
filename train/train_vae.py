@@ -63,8 +63,22 @@ class MelDataset(Dataset):
     def __getitem__(self, idx):
         try:
             # 2. 加载 .pt 文件
-            mel = torch.load(self.files[idx], map_location="cpu")
-            # TODO: 如果 .pt 是字典，这里需要 mel = mel['mel']
+            payload = torch.load(self.files[idx], map_location="cpu")
+            
+            # [关键修复]：处理字典格式，提取 "mel"
+            if isinstance(payload, dict):
+                if "mel" in payload:
+                    mel = payload["mel"]
+                elif "input_mel" in payload: # 兼容性
+                    mel = payload["input_mel"]
+                else:
+                    # 如果只有 latent 没有 mel，报错
+                    raise ValueError(f"File {self.files[idx]} is a dict but misses 'mel' key.")
+            else:
+                mel = payload # 假设直接存的 Tensor
+
+            # 确保是 Float 类型
+            mel = mel.float()
             
             # 3. 随机裁剪 (Random Crop)
             # VAE 训练需要固定长度的片段
@@ -86,6 +100,7 @@ class MelDataset(Dataset):
                     pad_len = self.crop_size - mel.shape[1]
                     mel = torch.nn.functional.pad(mel, (0, pad_len))
             return {"input_mel": mel}
+        
         except Exception as e:
             console.print(f"[red]Error loading {self.files[idx]}: {e}[/red]")
             # 出错返回随机噪声防止崩溃
@@ -179,7 +194,7 @@ def main(cfg: DictConfig):
 
     console.print(f"Loading Evaluation Data from: {cfg.data.eval_subsets}")
     eval_dataset = MelDataset(
-        data_dir=cfg.data.data_dir, 
+        data_dir=cfg.data.eval_data_dir, 
         subsets=cfg.data.eval_subsets,
         crop_size=cfg.data.crop_size,
         is_eval=True

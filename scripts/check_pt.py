@@ -260,4 +260,4 @@ if __name__ == "__main__":
     
     run_diagnostic(args.pt, args.wav, vae, vocoder, device)
     
-"""python ./scripts/check_pt.py --pt "/data0/determined/users/andywu/Audio-CALM-v2/data/latents/dev/LibriTTS_R/dev-clean/84/121123/84_121123_000008_000001.pt" --wav "/data0/determined/users/andywu/Audio-CALM-v2/data/raw/LibriTTS_R/dev/dev-clean/84/121123/84_121123_000008_000001.wav" --vae "/data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/audio_vae_4x_kl_annealing_l1_ssim/checkpoint-6900""""
+# python ./scripts/check_pt.py --pt "/data0/determined/users/andywu/Audio-CALM-v2/data/latents/dev/LibriTTS_R/dev-clean/84/121123/84_121123_000008_000001.pt" --wav "/data0/determined/users/andywu/Audio-CALM-v2/data/raw/LibriTTS_R/dev/dev-clean/84/121123/84_121123_000008_000001.wav" --vae "/data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/vae_4x_64_5e-4/checkpoint-8700"

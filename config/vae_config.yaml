@@ -24,19 +24,19 @@ model:
 # 【对应关系】：这里的路径被 train_vae.py 中的 `MelDataset` 读取
 data:
   # 训练数据根目录 (通常包含 LibriTTS_R/train)
-  data_dir: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/train"
+  data_dir: "${hydra:runtime.cwd}/data/mels/train/LibriTTS_R"
   # 验证数据根目录
-  eval_data_dir: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/dev-clean"
+  eval_data_dir: "${hydra:runtime.cwd}/data/mels/dev/LibriTTS_R"
   # 子数据集名称 (对应文件夹名)
   train_subsets: "train-clean-100,train-clean-360,train-other-500"
   eval_subsets: "dev-clean"
   # 训练时的裁剪长度 (Mel 帧数)
-  crop_size: 512
+  crop_size: 128
 
 # === 训练参数 (Training Args) ===
 # 【对应关系】：这里的参数被自动转换为 HF 的 `TrainingArguments`
 training:
-  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/audio_vae_2x_kl_annealing_l1_ssim"
+  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/vae_4x_64_5e-4"
   per_device_train_batch_size: 512  # 显存允许的情况下尽可能大
   per_device_eval_batch_size: 512
   gradient_accumulation_steps: 1
@@ -56,6 +56,6 @@ training:
   bf16: True # 开启 BF16 加速
   ddp_find_unused_parameters: False
   report_to: "wandb"
-  run_name: "audio_vae_4x_kl_annealing_l1_ssim"
+  run_name: "vae_4x_64_5e-4"
   save_strategy: "steps"
   seed: 42
