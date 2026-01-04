@@ -156,7 +156,7 @@ evaluation:
   test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl" # 确保此文件存在
   
   # 推理用 Checkpoint (训练后填写)
-  checkpoint_path: null
+  checkpoint_path: /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/asr-4-64-1e-4-2048-6/checkpoint-21980
   output_dir: "${hydra:runtime.cwd}/outputs/eval_results/asr"
   
   max_samples: 200

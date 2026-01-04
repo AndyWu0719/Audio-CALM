@@ -294,24 +294,28 @@ def run_asr_inference(model, tokenizer, latent_path, device):
 
 def eval_task_asr(cfg, model, tokenizer, data):
     """
-    功能：ASR 任务评估循环，计算 WER。
+    功能：ASR 任务评估循环，遵循 HuggingFace 标准计算 Corpus WER。
     """
     console.print("[bold green]>>> Running ASR Evaluation (Beam=5)[/bold green]")
     
-    # Normalizer Setup
+    # 1. Normalizer 设置 (这对 WER 影响巨大，需与 SOTA 论文保持一致)
+    # 如果是对标 Whisper，必须使用 BasicTextNormalizer
     try:
         from transformers.models.whisper.english_normalizer import BasicTextNormalizer
         normalizer = BasicTextNormalizer() 
     except ImportError:
+        logger.warning("Whisper normalizer not found, using simple regex fallback.")
         import re
         def normalizer(text): return re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
 
     out_path = os.path.join(cfg.evaluation.output_dir, "asr_results.csv")
     csv_file = open(out_path, "w", newline="", encoding="utf-8")
     writer = csv.writer(csv_file)
-    writer.writerow(["id", "wer", "text_ref", "text_pred", "norm_ref", "norm_pred"])
+    writer.writerow(["id", "norm_ref", "norm_pred", "sample_wer"]) # Header
 
-    wers = []
+    # 2. 【关键修改】创建列表来存储所有的预测和参考
+    all_predictions = []
+    all_references = []
     
     for i, item in enumerate(tqdm(data, desc="ASR Decoding")):
         text_ref = item.get("text", "")
@@ -320,29 +324,41 @@ def eval_task_asr(cfg, model, tokenizer, data):
         if not latent_path: continue
         
         try:
+            # 推理
             text_pred = run_asr_inference(model, tokenizer, latent_path, cfg.device)
+            
+            # 标准化 (Normalization)
             norm_ref = normalizer(text_ref)
             norm_pred = normalizer(text_pred)
             
-            if len(norm_ref) == 0:
-                wer = 0.0 if len(norm_pred) == 0 else 1.0
-            else:
-                wer = wer_metric.compute(predictions=[norm_pred], references=[norm_ref])
+            # 存入列表用于最后计算 Global WER
+            # 注意：evaluate 库要求输入是 List[str]
+            all_predictions.append(norm_pred)
+            all_references.append(norm_ref)
             
-            wers.append(wer)
-            writer.writerow([i, f"{wer:.4f}", text_ref, text_pred, norm_ref, norm_pred])
+            # (可选) 计算单句 WER 仅为了 debug 或观察 bad case，不用于最终报告
+            sample_wer = 0.0
+            if len(norm_ref) > 0:
+                sample_wer = wer_metric.compute(predictions=[norm_pred], references=[norm_ref])
             
-            if (i+1) % 10 == 0:
-                avg_wer = sum(wers) / len(wers)
-                console.print(f"[Sample {i+1}] Current Avg WER: {avg_wer:.2%}")
+            writer.writerow([i, norm_ref, norm_pred, f"{sample_wer:.4f}"])
                 
         except Exception as e:
             logger.error(f"Error sample {i}: {e}")
 
     csv_file.close()
-    if len(wers) > 0:
-        final_wer = sum(wers) / len(wers)
-        console.print(f"[bold blue]✅ Final WER: {final_wer:.2%}[/bold blue]")
+
+    # 3. 【关键修改】在循环外计算最终的 Corpus WER
+    if len(all_predictions) > 0:
+        console.print("[bold yellow]Computing Global WER...[/bold yellow]")
+        final_wer = wer_metric.compute(predictions=all_predictions, references=all_references)
+        console.print(f"[bold blue]✅ Final Standard WER: {final_wer:.2%}[/bold blue]")
+        
+        # 将最终结果写入日志文件
+        with open(os.path.join(cfg.evaluation.output_dir, "final_score.txt"), "w") as f:
+            f.write(f"Global WER: {final_wer}\n")
+    else:
+        console.print("[bold red]❌ No predictions generated.[/bold red]")
 
 # ==============================================================================
 # 4. TTS Logic (Flow Matching)

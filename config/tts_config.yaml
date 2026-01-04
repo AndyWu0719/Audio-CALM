@@ -45,7 +45,7 @@ model:
   # === [关键] 软重启 (Soft Restart) ===
   # 【重要】这里必须填入你 ASR 训练产出的 input_proj.bin 路径！
   # 示例路径，请替换为你的实际路径：
-  pretrained_projector_path: null
+  pretrained_projector_path: "/data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/asr-4-64-1e-4-2048-6/input_proj.bin"
   pretrained_head_path: null
   
   # MoA Adapter 路径
@@ -103,13 +103,13 @@ training:
   
   # 优化器
   learning_rate: 1e-4
-  num_train_epochs: 5
+  num_train_epochs: 3
 
   # SOA Token: 冷启动需要大倍率 (10.0 ~ 50.0)
   soa_lr_mult: 10.0  
   
   # Projector: 微调时使用较小倍率
-  projector_lr_mult: 1.0 
+  projector_lr_mult: 0.1 
   
   # Flow Head: 始终从头练，保持标准倍率
   head_lr_mult: 1.0
