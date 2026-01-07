@@ -460,7 +460,7 @@ def run_tts_inference(model, tokenizer, vocoder, text, steps=50, cfg_scale=2.5, 
     len_pred = len_pred.clamp(min=float(min_frames), max=float(max_frames))
     num_frames = int(len_pred.item())
 
-    # Duration prediction and alignment
+    # Duration prediction
     B, T_txt, D = text_context.shape
     T_aud = num_frames
 
@@ -476,16 +476,29 @@ def run_tts_inference(model, tokenizer, vocoder, text, steps=50, cfg_scale=2.5, 
     # 确保有效 token 至少为 1
     dur_int = torch.where(valid_mask, torch.clamp(dur_int, min=1), torch.zeros_like(dur_int))
 
-    # 若总和超出预算，按比例缩减并重新保底
-    current_sum = dur_int.sum(dim=1)
+    # 处理预测超长的情况
+    current_sum = dur_int.sum(dim=1, keepdim=True)
     if (current_sum > T_aud).any():
+        # 按比例缩减
         scale_factor = T_aud / current_sum.float().clamp(min=1)
-        dur_int = (dur_int.float() * scale_factor.unsqueeze(1)).long()
+        dur_int = (dur_int.float() * scale_factor).long()
         dur_int = torch.where(valid_mask, torch.clamp(dur_int, min=1), torch.zeros_like(dur_int))
+        
+        # 若缩减后仍超预算，从最长的 token 逐个减少
+        for b in range(B):
+            while dur_int[b].sum() > T_aud:
+                valid_durs = dur_int[b] * valid_mask[b].long()
+                max_idx = valid_durs.argmax()
+                if dur_int[b, max_idx] > 1:
+                    dur_int[b, max_idx] -= 1
+                else:
+                    break
 
-    # 重新计算 remain，保证非负
+    # [FIX] 计算余数并分配 - 这一步之前被遗漏了！
     remain = (T_aud - dur_int.sum(dim=1)).clamp(min=0)
+    dur_int = distribute_remainder_vectorized(dur_int, remain, valid_mask)
 
+    # 构建对齐矩阵
     align = build_alignment_from_durations(dur_int, valid_mask, T_aud, device, text_context.dtype)
 
     aligned_text = torch.bmm(align.transpose(1, 2), text_context)
@@ -529,7 +542,6 @@ def run_tts_inference(model, tokenizer, vocoder, text, steps=50, cfg_scale=2.5, 
     print(f"Mel stats - mean: {mel_hat.mean():.4f}, std: {mel_hat.std():.4f}")
 
     return vocoder.decode(mel_hat).cpu()
-
 
 def eval_task_tts(cfg, model, tokenizer, vocoder, data):
     console.print("[bold green]>>> Running TTS Eval[/bold green]")

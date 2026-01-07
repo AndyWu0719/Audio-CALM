@@ -210,14 +210,11 @@ class TransformerFlowHead(nn.Module):
             )
             
         def forward(self, x, t_emb, context=None, context_mask=None, x_mask=None):
-            # [FIX] 确保输入 tensor 内存连续
             x = x.contiguous()
             
-            # Self-Attention with optional mask
             x_norm = self.adaLN1(x, t_emb)
             x_norm = x_norm.contiguous()
             
-            # [FIX] 传入 key_padding_mask 用于 self-attention
             attn_out, _ = self.attn(x_norm, x_norm, x_norm, key_padding_mask=x_mask)
 
             x = x + attn_out
@@ -235,7 +232,6 @@ class TransformerFlowHead(nn.Module):
                 )
                 x = x + torch.sigmoid(self.ctx_gate) * ctx_out
 
-            # MLP
             x_norm = self.adaLN2(x, t_emb)
             x = x + self.mlp(x_norm)
             return x
@@ -243,7 +239,6 @@ class TransformerFlowHead(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=1024, num_layers=6, num_heads=16, context_dim=None):
         super().__init__()
         self.time_dim = 256
-        # [FIX] Project context to hidden_dim if provided
         self.context_proj = nn.Linear(context_dim, hidden_dim) if context_dim is not None else None
         
         # Time Embedding
@@ -254,6 +249,14 @@ class TransformerFlowHead(nn.Module):
         )
         
         self.in_proj = nn.Linear(input_dim + output_dim, hidden_dim)
+        
+        # [NEW] 序列位置编码
+        self.max_seq_len = 2048
+        self.register_buffer(
+            "pos_emb",
+            self._build_sinusoidal_pos_emb(self.max_seq_len, hidden_dim),
+            persistent=False
+        )
         
         self.blocks = nn.ModuleList([
             self.DiTBlock(hidden_dim, num_heads, self.time_dim)
@@ -266,29 +269,39 @@ class TransformerFlowHead(nn.Module):
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
-    # 在 TransformerFlowHead.forward 方法中
+    # [NEW] 构建正弦位置编码
+    @staticmethod
+    def _build_sinusoidal_pos_emb(max_len, dim):
+        position = torch.arange(max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
+        pe = torch.zeros(max_len, dim)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return pe.unsqueeze(0)  # [1, max_len, dim]
+
     def forward(self, condition, noisy_x, t, condition_mask=None, context=None, context_mask=None, x_mask=None):
         B, T, _ = noisy_x.shape
         if t.dim() > 1: 
             t = t[:, 0]
         t_emb = self.time_mlp(t)
 
-        # [FIX] 确保输入连续
         condition = condition.contiguous()
         noisy_x = noisy_x.contiguous()
         
         x = torch.cat([condition, noisy_x], dim=-1)
         x = self.in_proj(x)
+        
+        # [NEW] 添加位置编码
+        x = x + self.pos_emb[:, :T, :].to(x.dtype)
+        
         x = x.contiguous()
 
-        # [FIX] Project context before passing to blocks
         proj_context = None
         if context is not None and self.context_proj is not None:
             proj_context = self.context_proj(context.contiguous())
             proj_context = proj_context.contiguous()
             
         for block in self.blocks:
-            # [FIX] 传入 x_mask 供 self-attention 使用
             x = block(x, t_emb, context=proj_context, context_mask=context_mask, x_mask=x_mask)
             
         x = self.final_adaLN(x, t_emb)
@@ -517,8 +530,6 @@ class QwenCALMConfig(PretrainedConfig):
         self.mel_std = mel_std
         self.latent_mean = latent_mean
         self.latent_std = latent_std
-
-# 替换整个 QwenCALM.__init__ 方法
 
 class QwenCALM(PreTrainedModel):
     config_class = QwenCALMConfig
