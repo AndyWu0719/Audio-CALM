@@ -63,7 +63,7 @@ class MelDataset(Dataset):
     def __getitem__(self, idx):
         try:
             # 2. 加载 .pt 文件
-            payload = torch.load(self.files[idx], map_location="cpu")
+            payload = torch.load(self.files[idx], map_location="cpu", weights_only=False)
             
             # [关键修复]：处理字典格式，提取 "mel"
             if isinstance(payload, dict):
@@ -116,41 +116,36 @@ def data_collator(features):
     return {"mel": batch_mels, "labels": batch_mels}
 
 class VAETrainer(Trainer):
-    """
-    功能：自定义 Trainer，实现 KL 散度预热 (KL Annealing)。
-    """
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # 1. 前向传播
-        # 【对应关系】：调用 `AcousticVAE.forward`
         outputs = model(**inputs)
-        rec_loss = outputs.get("rec_loss")
-        kl_loss = outputs.get("kl_loss")
-        
-        # 2. KL Annealing (KL 权重动态调整)
-        # 在训练初期，KL 权重设为 0，让模型专注于重建 (rec_loss)。
-        # 随着 step 增加，KL 权重逐渐增加到目标值。防止模型一开始就发生 KL Collapse。
-        target_kl_weight = self.model.config.kl_weight
-        warmup_steps = 5000
-        current_step = self.state.global_step
-        
-        if current_step < warmup_steps:
-            current_weight = (current_step / warmup_steps) * target_kl_weight
+        if "loss" in outputs:
+            total = outputs["loss"]  # 直接用模型 forward 的总损失（含 ssim/stft/kl）
         else:
-            current_weight = target_kl_weight
-            
-        # 3. 记录日志 (Enhanced logging)
+            rec_loss = outputs["rec_loss"]
+            kl_loss = outputs["kl_loss"]
+            stft_loss = outputs.get("stft_loss", torch.tensor(0.0, device=rec_loss.device))
+            ssim_loss = outputs.get("ssim_loss", torch.tensor(0.0, device=rec_loss.device))
+            target_kl_weight = self.model.config.kl_weight
+            warmup_steps = 5000
+            current_step = self.state.global_step
+            current_weight = target_kl_weight * min(1.0, current_step / warmup_steps)
+            total = rec_loss + current_weight * kl_loss + 0.5 * stft_loss + 0.5 * ssim_loss
+
         if self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 0:
             logs = {
                 "train/rec_loss": outputs["rec_loss"].item(),
                 "train/kl_loss": outputs["kl_loss"].item(),
-                "train/ssim_loss": outputs["ssim_loss"].item(),
-                "train/kl_weight": current_weight
+                "train/stft_loss": outputs.get("stft_loss", torch.tensor(0)).item(),
+                "train/ssim_loss": outputs.get("ssim_loss", torch.tensor(0)).item(),
+                "train/kl_weight": self.model.config.kl_weight * min(1.0, self.state.global_step / 5000),
+                "train/kl_mean": outputs.get("kl_mean", torch.tensor(0)).item(),
+                "train/mu_mean": outputs.get("mu_mean", torch.tensor(0)).item(),
+                "train/mu_std": outputs.get("mu_std", torch.tensor(0)).item(),
+                "train/var_mean": outputs.get("var_mean", torch.tensor(0)).item(),
+                "train/kl_per_dim_max": outputs.get("kl_per_dim_max", torch.tensor(0)).item(),
             }
             self.log(logs)
-            
-        # 4. 计算最终 Loss
-        total_loss = rec_loss + current_weight * kl_loss
-        return (total_loss, outputs) if return_outputs else total_loss
+        return (total, outputs) if return_outputs else total
 
 @hydra.main(version_base=None, config_path="../config", config_name="vae_config")
 def main(cfg: DictConfig):

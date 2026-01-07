@@ -100,9 +100,9 @@ class AudioVAEConfig(PretrainedConfig):
         self, 
         in_channels=80,       # 输入 Mel 维度
         hidden_channels=512,  # 隐藏层通道数
-        latent_channels=64,   # 压缩后的 Latent 维度 (CALM 模型的输入维度)
+        latent_channels=128,   # 压缩后的 Latent 维度 (CALM 模型的输入维度)
         strides: List[int] = [2, 2], # 下采样倍率，[2,2] 意味着时间轴压缩 4 倍
-        kl_weight=0.0001,     # KL 散度权重的上限
+        kl_weight=0.00005,     # KL 散度权重的上限
         kl_clamp=2.0,         # KL Loss 的截断阈值，防止梯度爆炸
         latent_dropout=0.05,  # Latent 层的 Dropout
         norm_num_groups=32,   # GroupNorm 的组数
@@ -267,6 +267,42 @@ class AcousticVAE(PreTrainedModel):
         """
         h = self.decoder_net(z)
         return self.final_proj(h)
+    
+    @staticmethod
+    def _stft_mag(x, n_fft=1024, hop_length=256, win_length=None):
+        B, C, T = x.shape
+        win_length = win_length or n_fft
+        x_2d = x.reshape(-1, T).float()  # 用 float32 防止数值过小
+        window = torch.hann_window(win_length, device=x.device, dtype=x_2d.dtype)
+        X = torch.stft(
+            x_2d,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window=window,
+            return_complex=True,
+            normalized=False,
+            center=False,
+            pad_mode="reflect"
+        )
+        mag = torch.abs(X)
+        return mag.view(B, C, *mag.shape[-2:])
+
+    def stft_loss(self, x, y):
+        # x, y: [B, C=80, T]
+        T = x.size(-1)
+        specs = [(256, 64), (128, 32), (64, 16)]
+        specs = [(n_fft, hop) for n_fft, hop in specs if n_fft <= T]
+        if len(specs) == 0:
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+        loss = 0.0
+        for n_fft, hop in specs:
+            loss = loss + F.l1_loss(
+                self._stft_mag(x, n_fft=n_fft, hop_length=hop),
+                self._stft_mag(y, n_fft=n_fft, hop_length=hop)
+            )
+        return loss / len(specs)
 
     def forward(self, mel, labels=None, return_dict=True, **kwargs):
         """
@@ -276,57 +312,54 @@ class AcousticVAE(PreTrainedModel):
         - 被 `train_vae.py` 中的 `VAETrainer.compute_loss` 调用。
         """
         batch, channels, seq_len = mel.shape
+
+        # [FIX] Global normalization using config stats (not per-sample)
+        mel_mean = getattr(self.config, 'mel_mean', -6.589515)
+        mel_std = getattr(self.config, 'mel_std', 3.860679)
+        mel_normalized = (mel - mel_mean) / mel_std
         
-        # 1. 填充 (Padding)
-        # 确保输入长度能被总下采样率整除，否则卷积会报错
+        # Padding
         remainder = seq_len % self.total_stride
         if remainder != 0:
             pad_len = self.total_stride - remainder
-            mel_padded = F.pad(mel, (0, pad_len), mode='reflect')
+            mel_padded = F.pad(mel_normalized, (0, pad_len), mode='reflect')
         else:
-            mel_padded = mel
+            mel_padded = mel_normalized
 
-        # 2. VAE 核心流程: Encode -> Sample -> Decode
+        # VAE core
         mu, logvar = self.encode(mel_padded)
         z = self.reparameterize(mu, logvar)
         recon_mel = self.decode(z)
         
-        # 3. 裁剪 (Cropping)
-        # 去掉因为 Padding 多出来的部分，保证输入输出长度一致
+        # Crop
         if recon_mel.shape[2] != seq_len:
             recon_mel = recon_mel[:, :, :seq_len]
             
-        # 4. 计算 Loss
-        # 4.1 重建损失 (Reconstruction Loss)
+        # Loss computed on normalized mel
         if self.use_l1_loss:
-            rec_loss = F.l1_loss(recon_mel, mel)
+            rec_loss = F.l1_loss(recon_mel, mel_normalized)
         else:
-            rec_loss = F.mse_loss(recon_mel, mel)
+            rec_loss = F.mse_loss(recon_mel, mel_normalized)
         
-        # 4.2 感知损失 (SSIM Loss)
-        ssim_loss = self.ssim_loss(recon_mel, mel)
-        
-        # 4.3 KL 散度损失 (KL Divergence Loss)
-        # 约束 Latent 分布接近标准正态分布 N(0, 1)
-        kl_element = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
-        kl_per_step = torch.sum(kl_element, dim=1)
-        
-        # KL 截断 (防止 Loss 爆炸)
-        if self.config.kl_clamp > 0:
-            kl_per_step = torch.clamp(kl_per_step, min=self.config.kl_clamp)
-            
-        kl_loss = kl_per_step.mean()
-        
-        # 总损失 (注意：KL 的权重通常在 Trainer 中动态调整)
-        total_loss = rec_loss + self.ssim_weight * ssim_loss + self.config.kl_weight * kl_loss
+        ssim_loss = self.ssim_loss(recon_mel, mel_normalized)
+        stft_l = self.stft_loss(recon_mel, mel_normalized)
+
+        # KL loss
+        mu_f = mu.float()
+        logvar_f = logvar.float()
+        kl_element = 0.5 * (mu_f.pow(2) + logvar_f.exp() - 1 - logvar_f)
+        kl_loss = kl_element.mean()
+
+        total_loss = rec_loss + self.ssim_weight * ssim_loss + 0.25 * stft_l + self.config.kl_weight * kl_loss
 
         if return_dict:
             return {
                 "loss": total_loss,
                 "rec_loss": rec_loss,
                 "ssim_loss": ssim_loss,
+                "stft_loss": stft_l,
                 "kl_loss": kl_loss,
-                "recon_mel": recon_mel,
+                "recon_mel": recon_mel * mel_std + mel_mean,  # [FIX] Return denormalized
                 "z": z
             }
         return total_loss, recon_mel, z

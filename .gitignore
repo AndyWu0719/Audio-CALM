@@ -1,11 +1,13 @@
 data/
 qwen_audio_pretrained/
 qwen2_7B_Instruct
+qwen2_1.5B_Instruct
 outputs/
 gittoken.txt
 /data0/determined/users/andywu/Audio-CALM-v2/README.md
 qwen2_audio_pretrained/
 wandb/
-tmp_hifigan_checkpoints/
+tmp_hifigan/
+tmp_vae_wavs/
 eval_calm.log
 train_calm.log

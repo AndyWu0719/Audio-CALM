@@ -6,10 +6,10 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_ENABLE_SDPA_FLASH_ATTENTION=1
 
 export WANDB_PROJECT="Omni-Flow-Train" 
-export WANDB_NAME="asr_stage2_4-128-5e-5-2048-6" 
+export WANDB_NAME="4-128-5e-5-2048-6" 
 MASTER_PORT=29505
 
 torchrun --nproc_per_node=4 --master_port=$MASTER_PORT train/train_calm.py \
-    --config-name="asr_config" \
+    --config-name="calm_config" \
     training.run_name="$WANDB_NAME" \
     training.output_dir="$(pwd)/outputs/checkpoints/omni_flow/$WANDB_NAME"

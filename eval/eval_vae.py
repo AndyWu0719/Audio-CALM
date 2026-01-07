@@ -31,6 +31,23 @@ except ImportError:
             HifiGAN = getattr(mod, available[0])
         else:
             raise ImportError("Could not find HifiGAN class!")
+        
+def latent_stats(vae_model, mel):
+    with torch.no_grad():
+        mu, logvar = vae_model.encode(mel)
+        kl_element = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)  # [B,C,T]
+        kl_mean = kl_element.mean().item()
+        mu_mean = mu.mean().item()
+        mu_std = mu.std().item()
+        var_mean = logvar.exp().mean().item()
+        kl_per_dim_max = kl_element.mean(dim=[0,2]).max().item()
+    return {
+        "kl_mean": kl_mean,
+        "mu_mean": mu_mean,
+        "mu_std": mu_std,
+        "var_mean": var_mean,
+        "kl_per_dim_max": kl_per_dim_max,
+    }
 
 def load_models(checkpoint_path, device):
     console.print(f"[bold]Loading VAE from {checkpoint_path}...[/bold]")
@@ -60,14 +77,21 @@ def run_inference(audio_path, vae_model, hifi_gan, extractor, device):
     
     with torch.no_grad():
         gt_mel = extractor(wav)
-        outputs = vae_model(gt_mel)
-        recon_mel = outputs['recon_mel']
-        
-        # Vocoder
-        wav_recon = hifi_gan.decode_batch(recon_mel * 0.43429)
-        wav_oracle = hifi_gan.decode_batch(gt_mel * 0.43429)
-        
-    return wav.cpu(), wav_recon.cpu(), wav_oracle.cpu(), gt_mel, recon_mel
+        mean = gt_mel.mean(dim=-1, keepdim=True)
+        std = gt_mel.std(dim=-1, keepdim=True).clamp(min=1e-5)
+        norm_mel = (gt_mel - mean) / std
+
+        outputs = vae_model(norm_mel)
+        recon_norm = outputs['recon_mel']
+        # 反归一化
+        recon_mel = recon_norm * std + mean
+        stats = latent_stats(vae_model, norm_mel)
+
+        # Vocoder 解码使用反归一化后的 mel，不再乘 0.43429
+        wav_recon = hifi_gan.decode_batch(recon_mel)
+        wav_oracle = hifi_gan.decode_batch(gt_mel)
+
+    return wav.cpu(), wav_recon.cpu(), wav_oracle.cpu(), gt_mel, recon_mel, stats
 
 def create_demo(checkpoint_path):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -128,11 +152,12 @@ def main():
         vae_model, hifi_gan, extractor = load_models(args.checkpoint, device)
         
         console.print(f"Processing {args.audio_path}...")
-        orig, recon, oracle, gt_mel, recon_mel = run_inference(args.audio_path, vae_model, hifi_gan, extractor, device)
-        
-        # Calc Metrics
+        orig, recon, oracle, gt_mel, recon_mel, stats = run_inference(
+            args.audio_path, vae_model, hifi_gan, extractor, device
+        )
         mse = torch.nn.functional.mse_loss(recon_mel, gt_mel).item()
         console.print(f"MSE Loss: {mse:.6f}")
+        console.print(f"KL mean: {stats['kl_mean']:.4f}, mu_mean: {stats['mu_mean']:.4f}, mu_std: {stats['mu_std']:.4f}, var_mean: {stats['var_mean']:.4f}, KL_per_dim_max: {stats['kl_per_dim_max']:.4f}")
         
         # Save
         torchaudio.save(os.path.join(args.output_dir, "vae_recon.wav"), recon.squeeze(0), 16000)

@@ -1,6 +1,3 @@
-# config/asr_config.yaml
-# 专用于 ASR (Speech-to-Text) 任务的训练配置
-
 defaults:
   - _self_
 
@@ -11,162 +8,124 @@ hydra:
   job:
     chdir: False
 
-# -------------------------------------------------------------------
-# MODEL CONFIGURATION (模型参数)
-# -------------------------------------------------------------------
 model:
   head_type: "flow"
-  # 损失权重
-  audio_loss_weight: 1.0
-  ctc_loss_weight: 0.1
+  tts_loss_weight: 0.0
+  asr_loss_weight: 1.0
+  len_pred_loss_weight: 0.1       # TTS len_loss 不参与，但留值无碍
+  dur_pred_loss_weight: 0.0       # 本阶段不训 dur
 
-  # === 基础模型路径 ===
-  qwen_path: "${hydra:runtime.cwd}/qwen2_7B_Instruct"
-  vae_path: "${hydra:runtime.cwd}/outputs/checkpoints/vae_4x_64_5e-4/checkpoint-8700"
-  
-  # === LoRA 配置 ===
+  qwen_path: "${hydra:runtime.cwd}/qwen2_1.5B_Instruct"
+  vae_path: "${hydra:runtime.cwd}/outputs/checkpoints/vae_4x_128_5e-4/checkpoint-17350"
+
   use_lora: True
   lora_rank: 64
   lora_alpha: 128
   lora_dropout: 0.05
   merge_lora: False
-  
-  # === [关键] 冻结策略 ===
-  # ASR 任务必须解冻 Projector，否则模型“听不懂”声音
-  freeze_projector: False
-  
-  # === Latent 配置 ===
+
+  freeze_projector: True           # ASR 阶段建议冻结 projector，减少干扰
   use_precomputed_latents: True
-  latent_dim: 64
+  latent_dim: 128
 
-  # === Flow Head 配置 ===
-  # 即使只练 ASR，模型初始化也需要这些参数
-  flow_hidden_dim: 2048 
-  flow_num_layers: 6 
+  tts_flow_hidden_dim: 768
+  tts_flow_num_layers: 4
+  asr_flow_hidden_dim: 768
+  asr_flow_num_layers: 4
 
-  # === [关键] 软重启 (Soft Restart) ===
-  # ASR 通常是从头训练 Projector，或者加载通用的预训练权重
-  pretrained_projector_path: null 
-  pretrained_head_path: null
-  
-  # MoA Adapter 路径
-  pretrained_lora_path_tts: null
-  pretrained_lora_path_asr: null
+  pretrained_projector_path: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow_tts/best/input_proj.bin"
+  pretrained_tts_head_path: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow_tts/best/tts_flow_head.bin"
+  pretrained_tts_len_pred_path: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow_tts/best/tts_len_predictor.bin"
+  pretrained_asr_head_path: null
+  pretrained_asr_query_path: null
+  pretrained_lora_path: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow_tts/best/adapter_model.bin"  # 若 TTS 用了 LoRA，填此；否则设 null
 
-# -------------------------------------------------------------------
-# DATA CONFIGURATION (数据参数)
-# -------------------------------------------------------------------
+  mel_mean: -6.589515
+  mel_std: 3.860679
+
 data:
-  # === [关键] 任务模式 ===
   task_mode: "asr"
-  task_prob_tts: 0.0 # ASR 模式下此参数无效，但在 mix 逻辑中为 0
+  task_prob_tts: 0.0
 
-  # 数据集路径
   datasets:
     asr:
-      raw_root: "${hydra:runtime.cwd}/data/raw/LibriSpeech/train"
       latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriSpeech"
       eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriSpeech"
-    
-    # 保留 tts/mix 键以防代码报错，但不会被读取
+      subsets: "train-clean-100,train-clean-360,train-other-500"
     tts:
-      raw_root: null
-      latent_dir: null
-      eval_latent_dir: null
-    mix:
-      raw_root: null
-      latent_dir: null
-      eval_latent_dir: null
+      latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriTTS_R"
+      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriTTS_R"
+      subsets: "train-clean-100,train-clean-360,train-other-500"
 
-  # 子数据集名称
   train_subsets: "train-clean-100,train-clean-360,train-other-500"
   eval_subsets: "dev-clean"
-  
-  # 序列约束
-  max_text_len: 128
-  max_audio_len: 512
-  latent_downsample: 4
+  max_text_len: 96
+  max_audio_len: 384
+  latent_downsample: 1
 
-# -------------------------------------------------------------------
-# TRAINING CONFIGURATION (训练参数)
-# -------------------------------------------------------------------
 training:
-  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa/asr"
-  run_name: "asr-4x-64-1e-4-2048-6"
-  
-  resume_from_checkpoint: "/data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/asr-4-64-1e-4-2048-6/checkpoint-1500" 
-  ignore_data_skip: False
-  
-  # Batch 设置
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 16 
-  
-  # 优化器
-  learning_rate: 1e-4
-  # ASR 需要更久的训练来对齐特征，建议 15-20 Epochs
-  num_train_epochs: 10
+  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow_asr"
+  run_name: "omni-flow-asr"
 
-  # SOA Token: 冷启动需要大倍率 (10.0 ~ 50.0)
-  soa_lr_mult: 10.0  
-  
-  # Projector: 微调时使用较小倍率
-  projector_lr_mult: 5.0 
-  
-  # Flow Head: 始终从头练，保持标准倍率
-  head_lr_mult: 0.0
-  
-  # 硬件加速
+  resume_from_checkpoint: null
+  ignore_data_skip: False
+
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 2
+
+  soa_lr_mult: 5.0
+  proj_lr_mult: 1.0          # projector 冻结时无效
+  head_lr_mult: 3.0
+
+  learning_rate: 5e-5
+  num_train_epochs: 5        # 视收敛可调
+
   bf16: True
   gradient_checkpointing: True
-  
+
   optim: "adamw_torch"
   lr_scheduler_type: "cosine"
-  warmup_ratio: 0.05
+  warmup_ratio: 0.1
   max_grad_norm: 1.0
-  
-  # 日志与保存
+
   logging_steps: 10
   save_strategy: "steps"
-  save_steps: 500
+  save_steps: 1000
   save_total_limit: 2
-  
-  # 评估
+
   eval_strategy: "steps"
-  eval_steps: 500
+  eval_steps: 1000
   load_best_model_at_end: True
   metric_for_best_model: "loss"
-  
-  # 其他
+
   group_by_length: False
-  label_smoothing_factor: 0.1
+  label_smoothing_factor: 0.0
   ddp_find_unused_parameters: True
-  dataloader_num_workers: 8
+  dataloader_num_workers: 5
   dataloader_pin_memory: True
   remove_unused_columns: False
   report_to: "wandb"
   seed: 42
   deepspeed: "${hydra:runtime.cwd}/train/ds_config.json"
 
-# -------------------------------------------------------------------
-# EVALUATION CONFIGURATION (评估参数)
-# -------------------------------------------------------------------
 evaluation:
   task: "asr"
-  test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl" # 确保此文件存在
-  
-  # 推理用 Checkpoint (训练后填写)
-  checkpoint_path: /data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/asr-4-64-1e-4-2048-6/checkpoint-21980
-  output_dir: "${hydra:runtime.cwd}/outputs/eval_results/asr"
-  
-  max_samples: 200
-  max_latents: 1024
-  use_vocoder: False # ASR 不需要 Vocoder
-  flow_steps: 10
-  cfg_scale: 1.0
+  datasets:
+    asr:
+      latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriSpeech"
+      subsets: "dev-clean"
+    tts:
+      latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriTTS_R"
+      subsets: "dev-clean"
+  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow_asr/best"
+  output_dir: "${hydra:runtime.cwd}/outputs/eval_results_asr"
+  max_samples: 50
+  use_vocoder: True
+  steps: 20
+  cfg_scale: 3.0
   eval_asr_model: "openai/whisper-tiny.en"
-  
-  wandb_project: "Audio-CALM-Eval"
+  wandb_project: "Omni-Flow-Eval"
   wandb_entity: null
   web_demo: False
   seed: 42

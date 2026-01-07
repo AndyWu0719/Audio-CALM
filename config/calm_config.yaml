@@ -1,5 +1,6 @@
 # config/calm_config.yaml
-# Hydra 配置文件，用于集中管理模型、数据和训练的超参数。
+# Omni-Flow Hydra 配置文件
+# 统一管理 Omni-Flow 双向流匹配模型的超参数
 
 defaults:
   - _self_
@@ -15,190 +16,168 @@ hydra:
 # MODEL CONFIGURATION (模型参数配置)
 # -------------------------------------------------------------------
 model:
-  # 生成头类型，目前支持 "flow" (流匹配)
+  # 生成头类型
   head_type: "flow"
   
   # 损失函数权重
-  # audio_loss_weight: TTS 任务中流匹配损失的权重
-  # ctc_loss_weight: ASR 任务中 CTC 辅助损失的权重
-  audio_loss_weight: 1.0
-  ctc_loss_weight: 0.1
+  tts_loss_weight: 1.0
+  asr_loss_weight: 1.0
+  len_pred_loss_weight: 0.1
+  dur_pred_loss_weight: 0.05
 
   # === 基础模型路径 ===
-  # 【对应关系】：被 modeling_calm.py 中的 QwenCALM 加载
-  # Qwen2 LLM 的路径 (HuggingFace 格式)
-  qwen_path: "${hydra:runtime.cwd}/qwen2_7B_Instruct"
+  # Qwen2 LLM 的路径
+  qwen_path: "${hydra:runtime.cwd}/qwen2_1.5B_Instruct"
   
   # VAE 的路径 (用于音频压缩和解压)
-  # 注意：必须指向训练好的 VAE checkpoint 文件夹
-  vae_path: "${hydra:runtime.cwd}/outputs/checkpoints/audio_vae_4x_kl_annealing_l1_ssim/checkpoint-6900"
+  vae_path: "${hydra:runtime.cwd}/outputs/checkpoints/vae_4x_128_5e-4/checkpoint-17350"
   
-  # === LoRA 配置 (PEFT) ===
-  # 【对应关系】：被 train_calm.py 用于初始化 LoraConfig
+  # === LoRA 配置 (Unified) ===
   use_lora: True
-  lora_rank: 64       # LoRA 的秩，越大容量越大但显存占用越高
-  lora_alpha: 128     # LoRA 的缩放系数
+  lora_rank: 64
+  lora_alpha: 128
   lora_dropout: 0.05
-  merge_lora: False   # 训练时设为 False，仅在导出或推理时设为 True
+  merge_lora: False
   
   # === 冻结策略 ===
-  # 是否冻结 AudioInputProjector。
-  # - ASR 训练：建议设为 False (解冻)，让 Projector 学习如何提取语义。
-  # - TTS 训练：建议设为 True (冻结)，如果 Projector 已经由 ASR 训练好了。
-  freeze_projector: True
+  # Omni-Flow 建议解冻 Projector 以便学习 Audio -> Text 的语义映射
+  freeze_projector: False
   
   # === Latent 配置 ===
-  # 是否使用预计算好的 .pt 文件 (推荐 True 以加速训练)
-  # 【对应关系】：影响 train_calm.py 中 Dataset 的加载逻辑
   use_precomputed_latents: True
-  latent_dim: 64      # VAE 的 Latent 维度，必须与 VAE 训练配置一致
+  latent_dim: 128
 
-  # === Flow Matching Head 配置 ===
-  # 【对应关系】：实例化 modeling_calm.py 中的 FlowMatchingHead
-  flow_hidden_dim: 2048   # 生成头的隐藏层维度
-  flow_num_layers: 4      # 生成头的层数 (ResNet Block 数量)
+  tts_flow_hidden_dim: 768 
+  tts_flow_num_layers: 4
+
+  asr_flow_hidden_dim: 768
+  asr_flow_num_layers: 4
 
   # === 软重启 (Soft Restart) ===
-  # 用于分阶段训练：加载预训练好的组件权重。
-  # 例如：在训练 TTS 时，加载 ASR 训练好的 Projector。
-  # 路径指向 .bin 文件
-  pretrained_projector_path: "/data0/determined/users/andywu/Audio-CALM-v2/outputs/checkpoints/calm_moa_flow/flow-moa-asr-4-dim64-1e-4-2048-4/input_proj.bin"
-  pretrained_head_path: null  # 如果从头训练 TTS Head，设为 null
+  pretrained_projector_path: null
+  pretrained_tts_head_path: null
+  pretrained_asr_head_path: null
+  pretrained_lora_path: null
 
-  # MoA (Mixture of Adapters) 预训练路径
-  # 如果想基于之前的 Adapter 继续微调，在此指定路径；否则设为 null 从头训练
-  pretrained_lora_path_tts: null
-  pretrained_lora_path_asr: null
+  mel_mean: -6.589515 # 预计算 Mel 归一化参数，需要自行计算
+  mel_std: 3.860679  # 预计算 Mel 归一化参数，需要自行计算
+
 
 # -------------------------------------------------------------------
 # DATA CONFIGURATION (数据参数配置)
 # -------------------------------------------------------------------
 data:
   # === 任务模式 ===
-  # 可选值: "tts", "asr", "mix"
-  # - "tts": 仅加载 TTS 数据，只训练 TTS Adapter 和 Flow Head。
-  # - "asr": 仅加载 ASR 数据，只训练 ASR Adapter 和 Projector。
-  # - "mix": 混合训练，动态切换 Adapter。
-  task_mode: "tts" 
-  
-  # 在 "mix" 模式下，采样到 TTS 任务的概率 (0.0 - 1.0)
-  task_prob_tts: 1.0
+  # "tts", "asr", "mix"
+  task_mode: "mix" 
+  task_prob_tts: 0.5
 
   # === 数据集路径 ===
-  # 【对应关系】：被 train_calm.py 中的 CalmDataset 读取
   datasets:
-    tts:
-      raw_root: "${hydra:runtime.cwd}/data/raw/LibriTTS_R/train"
-      latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriTTS_R"
-      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriTTS_R"
-    
     asr:
-      raw_root: "${hydra:runtime.cwd}/data/raw/LibriSpeech/train"
       latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriSpeech"
       eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriSpeech"
-    
-    mix:
-      raw_root: null
-      # 混合模式下通常指向包含所有数据的父目录
-      latent_dir: "${hydra:runtime.cwd}/data/latents/train" 
-      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev"
-
-  # 子数据集名称 (对应文件夹名)，逗号分隔
+      subsets: "train-clean-100,train-clean-360,train-other-500" 
+      
+    tts:
+      latent_dir: "${hydra:runtime.cwd}/data/latents/train/LibriTTS_R"
+      eval_latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriTTS_R"
+      subsets: "train-clean-100,train-clean-360,train-other-500"
+      
   train_subsets: "train-clean-100,train-clean-360,train-other-500"
   eval_subsets: "dev-clean"
   
   # === 序列约束 ===
-  max_text_len: 512   # 文本 Token 最大长度
-  max_audio_len: 1024 # 音频 Latent 最大帧数 (约 10-20秒，取决于 VAE 下采样率)
-  
-  # Latent 下采样率 (相对于原始 Mel 频谱)
-  # 必须与 VAE 的 strides 总乘积一致 (例如 [2, 2] -> 4)
-  latent_downsample: 4
+  max_text_len: 96
+  max_audio_len: 384
+  latent_downsample: 1
 
 # -------------------------------------------------------------------
 # TRAINING CONFIGURATION (训练参数配置)
 # -------------------------------------------------------------------
 training:
-  # 输出目录
-  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow"
-  # 运行名称 (用于 WandB 和文件夹命名)
-  run_name: "flow-moa-tts-4-dim64-1e-4-2048-4"
+  output_dir: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow"
+  run_name: "omni-flow"
   
-  # 断点续训 (设为 checkpoint 路径可恢复训练)
   resume_from_checkpoint: null 
   ignore_data_skip: False
   
   # === Batch设置 ===
-  per_device_train_batch_size: 1
+  per_device_train_batch_size: 16
   per_device_eval_batch_size: 1
-  # 梯度累积步数：Effective Batch Size = 1 * 32 * GPU数
-  gradient_accumulation_steps: 32 
+  gradient_accumulation_steps: 2
+
+  soa_lr_mult: 5.0
+  proj_lr_mult: 1.0
+  head_lr_mult: 3.0
   
   # === 优化器设置 ===
-  learning_rate: 1e-4     # 学习率
-  num_train_epochs: 3     # 训练轮数 (建议 TTS 任务增加到 10-20)
+  learning_rate: 5e-5
+  num_train_epochs: 8
   
   # === 硬件加速 ===
-  bf16: True              # 开启 BF16 (Ampere 架构显卡推荐)
-  gradient_checkpointing: True # 开启梯度检查点以节省显存
+  bf16: True
+  gradient_checkpointing: True
   
   # === 调度器 ===
   optim: "adamw_torch"
   lr_scheduler_type: "cosine"
-  warmup_ratio: 0.05
+  warmup_ratio: 0.1
   max_grad_norm: 1.0
   
   # === 日志与保存 ===
   logging_steps: 10
   save_strategy: "steps"
-  save_steps: 1000        # 每 1000 步保存一次 Checkpoint
-  save_total_limit: 2     # 最多保留 2 个 Checkpoint
+  save_steps: 500
+  save_total_limit: 2
   
   # === 评估策略 ===
   eval_strategy: "steps"
-  eval_steps: 1000
+  eval_steps: 500
   load_best_model_at_end: True
   metric_for_best_model: "loss"
   
   # === 其他 ===
   group_by_length: False
-  label_smoothing_factor: 0.0 # ASR 任务可设为 0.1
-  ddp_find_unused_parameters: True # MoA 必须开启，因为部分参数在某些 forward 中未被使用
-  dataloader_num_workers: 8
+  label_smoothing_factor: 0.0
+  ddp_find_unused_parameters: True
+  dataloader_num_workers: 5
   dataloader_pin_memory: True
   remove_unused_columns: False
   report_to: "wandb"
   seed: 42
-  # DeepSpeed 配置文件路径
   deepspeed: "${hydra:runtime.cwd}/train/ds_config.json"
 
 # -------------------------------------------------------------------
 # EVALUATION CONFIGURATION (评估参数配置)
 # -------------------------------------------------------------------
 evaluation:
-  # 评估任务类型: "tts" 或 "asr"
-  task: "tts"
-  # 测试集清单路径
-  test_file: "${hydra:runtime.cwd}/data/jsonl/dev.jsonl"
+  # 评估任务类型: "tts", "asr", "mix"
+  task: "mix"
+  datasets:
+    asr:
+      latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriSpeech"
+      subsets: "dev-clean"
+    
+    tts:
+      latent_dir: "${hydra:runtime.cwd}/data/latents/dev/LibriTTS_R"
+      subsets: "dev-clean"
   
   # === 推理 Checkpoint ===
-  # 指定要评估的模型路径 (包含 adapter, .bin 等)
-  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/calm_moa_flow/tts-4-dim64-1e-4-2048-6/checkpoint-8316"
-  # 评估结果输出目录
-  output_dir: "${hydra:runtime.cwd}/outputs/eval_results_moa"
+  checkpoint_path: "${hydra:runtime.cwd}/outputs/checkpoints/omni_flow/4-128-5e-5-2048-6/checkpoint-7350"
+  output_dir: "${hydra:runtime.cwd}/outputs/eval_results"
   
-  # === 生成参数 (TTS) ===
-  max_samples: 50     # 仅评估前 50 个样本
-  max_latents: 300    # 生成的最大 Latent 长度
+  # === 生成参数 ===
+  max_samples: 50
   use_vocoder: True
-  flow_steps: 50      # 流匹配采样的步数 (越高质量越好，但越慢)
-  cfg_scale: 1.0      # CFG 引导系数
+  steps: 20
+  cfg_scale: 3.0
   
   # === ASR 评估 ===
-  eval_asr_model: "openai/whisper-tiny.en" # 用于计算生成的语音的 WER (如果是 TTS 任务)
+  eval_asr_model: "openai/whisper-tiny.en"
   
   # === 追踪 ===
-  wandb_project: "Audio-CALM-Eval"
+  wandb_project: "Omni-Flow-Eval"
   wandb_entity: null
   web_demo: False
   seed: 42
