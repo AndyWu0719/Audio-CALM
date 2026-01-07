@@ -41,9 +41,7 @@ def vae_upper_bound(dataset, model, vocoder, save_dir, num_samples=8):
             
             # Decode
             mel = model.vae.decode(latent)  # [1, 80, T]
-            
-            # Denormalize
-            mel = mel * model.config.mel_std + model.config.mel_mean
+            print(f"[VAE] raw mel mean={mel.mean().item():.3f}, std={mel.std().item():.3f}")
             
             # Vocoder
             wav = vocoder.decode(mel).cpu().squeeze()
@@ -75,7 +73,7 @@ def flow_baseline(batch, model):
     if len(idx) == 0:
         return None
     
-    idx_tensor = torch.tensor(idx, device=model.llm.device)
+    idx_tensor = torch.tensor(idx, device=batch["text_input_ids"].device)
     
     # 准备数据 - 创建新的 batch 字典避免修改原始数据
     new_batch = {}
@@ -99,9 +97,6 @@ def flow_baseline(batch, model):
         print(f"[Flow] Error in forward: {e}")
         return None
     
-    # 计算 baseline（pred_v = 0 时的 loss）
-    # 这相当于 MSE(0, x1 - x0) = MSE(x0, x1) ≈ 2 * var(latent)
-    # 对于标准化后的 latent，baseline ≈ 2.0
     baseline = 2.0
     
     return (current_loss, baseline)

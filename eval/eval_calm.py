@@ -281,8 +281,7 @@ def load_model(cfg, device):
 
     model.to(device)
 
-    use_bf16 = cfg.training.get("bf16", False) or model.llm.dtype == torch.bfloat16
-    dtype = torch.bfloat16 if (use_bf16 and torch.cuda.is_bf16_supported()) else torch.float32
+    dtype = torch.float32
 
     model.llm.to(dtype)
     model.input_proj.to(dtype)
@@ -534,9 +533,6 @@ def run_tts_inference(model, tokenizer, vocoder, text, steps=50, cfg_scale=2.5, 
     # VAE decode
     latents_for_vae = latents_denorm.transpose(1, 2).float()  # [B, D, T]
     mel_hat = model.vae.decode(latents_for_vae)
-
-    # Denormalize mel using global stats
-    mel_hat = mel_hat * model.config.mel_std + model.config.mel_mean
 
     print(f"Latent stats - mean: {latents_denorm.mean():.4f}, std: {latents_denorm.std():.4f}")
     print(f"Mel stats - mean: {mel_hat.mean():.4f}, std: {mel_hat.std():.4f}")

@@ -5,7 +5,7 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_ENABLE_SDPA_FLASH_ATTENTION=1
 
-CHECKPOINT_PATH="$(pwd)/outputs/checkpoints/omni_flow/tts_stage1_4-128-5e-5-2048-6/checkpoint-8316"
+CHECKPOINT_PATH="$(pwd)/outputs/checkpoints/omni_flow/tts_stage1_4-128-5e-5-2048-6/checkpoint-7000"
 export WANDB_PROJECT="Omni-Flow-Eval"
 export WANDB_NAME="tts_stage1_4-128-5e-5-2048-6"
 
